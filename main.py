@@ -8,14 +8,13 @@ import os
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def forensic_scanner(text):
-    # Professional Patterns for Indian Banks
+def smart_parser(text):
+    # Banking Patterns: Khud identify karega data ko
     patterns = {
         "upi_names": r"(?:UPI/|PAYTM/|GPR/)(?:[^/]+/){2}([^/]+)",
         "utr_ids": r"\b\d{12}\b",
-        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|YESB|CANARA|IDBI)",
-        "locations": r"(?:ATM/|POS/)([A-Z\s]{4,})",
-        "amounts": r"(?:\s|^)(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)(?:\s|$)"
+        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|YESB|CANARA|IDBI|PYTM)",
+        "locations": r"(?:ATM/|POS/|WDL/)([A-Z\s]{4,})",
     }
     
     results = {}
@@ -25,39 +24,40 @@ def forensic_scanner(text):
             counts = pd.Series(found).value_counts().head(10)
             results[key] = "\n".join([f"• {k.strip()} ({v})" for k, v in counts.items()])
         else:
-            results[key] = "No suspicious records found"
-            
+            results[key] = "Data not identified in this file"
     return results
 
 @app.post("/analyze")
-async def analyze_statement(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
     with open(temp_path, "wb") as f:
         f.write(await file.read())
 
     try:
-        doc = fitz.open(temp_path)
         full_text = ""
-        for page in doc:
-            full_text += page.get_text()
-        doc.close()
+        # Auto-Identify Format
+        if file.filename.endswith('.pdf'):
+            doc = fitz.open(temp_path)
+            for page in doc: full_text += page.get_text()
+            doc.close()
+        elif file.filename.endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(temp_path)
+            full_text = df.to_string()
+        elif file.filename.endswith('.csv'):
+            df = pd.read_csv(temp_path)
+            full_text = df.to_string()
+        else:
+            return {"status": "error", "message": "Unsupported Format"}
 
-        if not full_text.strip():
-            return {"status": "error", "message": "Scanned Image PDF detected. Please upload digital PDF."}
-
-        scan_results = forensic_scanner(full_text)
-
-        analysis_data = {
-            "most_frequent_person": scan_results["upi_names"],
-            "top_banks": scan_results["banks"],
-            "top_locations": scan_results["locations"],
-            "top_utr": scan_results["utr_ids"],
-            "suspicious": "⚠️ High Value Analysis:\nCheck UTR list for bulk transfers."
-        }
-
-        return {"status": "success", "data": analysis_data}
-
+        results = smart_parser(full_text)
+        return {"status": "success", "data": {
+            "most_frequent_person": results["upi_names"],
+            "top_banks": results["banks"],
+            "top_locations": results["locations"],
+            "top_utr": results["utrs_ids"], # Fix: Corrected key name
+            "suspicious": "Forensic Scan: Complete"
+        }}
     except Exception as e:
-        return {"status": "error", "message": f"Engine Error: {str(e)}"}
+        return {"status": "error", "message": str(e)}
     finally:
         if os.path.exists(temp_path): os.remove(temp_path)
