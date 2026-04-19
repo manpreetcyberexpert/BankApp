@@ -21,34 +21,32 @@ async def analyze_statement(file: UploadFile = File(...)):
                 text = page.extract_text()
                 if text: all_text += text + "\n"
 
-        # --- ADVANCED EXTRACTION LOGIC ---
-        # UPI IDs (Names)
+        if not all_text.strip():
+            return {"status": "success", "data": {
+                "most_frequent_person": "No Text Found", "top_banks": "N/A", 
+                "top_locations": "N/A", "top_utr": "N/A", "suspicious": "N/A"
+            }}
+
+        # Analysis Logic (RegEx based)
         upi_names = re.findall(r'UPI/.*?/(.*?)/', all_text)
-        # UTR Numbers (12 Digits)
         utrs = re.findall(r'\d{12}', all_text)
-        # ATM IDs & Locations
-        atm_locations = re.findall(r'ATM-(.*?)\s', all_text)
-        # Banks (Keywords)
         banks = re.findall(r'(HDFC|SBI|ICICI|AXIS|PNB|BOB|PAYTM|KOTAK)', all_text, re.I)
-        # High Value Transactions (>20,000)
-        suspicious = re.findall(r'[Rr][Ss]\.?\s?(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?)', all_text)
-        suspicious_flags = [s for s in suspicious if float(s.replace(',', '')) > 20000]
 
-        def get_top_10(data_list):
-            if not data_list: return "No Record Found"
+        def format_top_10(data_list):
+            if not data_list: return "No Records"
             counts = pd.Series(data_list).value_counts().head(10)
-            return "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
+            return "\n".join([f"{k} ({v})" for k, v in counts.items()])
 
-        analysis_data = {
-            "most_frequent_person": get_top_10(upi_names),
-            "top_banks": get_top_10(banks),
-            "top_locations": get_top_10(atm_locations),
-            "top_utr": get_top_10(utrs),
-            "suspicious": f"⚠️ Found {len(suspicious_flags)} High Value Transfers!\n" + "\n".join(suspicious_flags[:5])
+        return {
+            "status": "success",
+            "data": {
+                "most_frequent_person": format_top_10(upi_names),
+                "top_banks": format_top_10(banks),
+                "top_locations": "Scanning Locations...",
+                "top_utr": format_top_10(utrs),
+                "suspicious": "Analysis in Progress"
+            }
         }
-
-        return {"status": "success", "data": analysis_data}
-
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
