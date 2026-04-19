@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF for PDF
 import pandas as pd
 import re
 import os
@@ -8,22 +8,23 @@ import os
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def smart_parser(text):
+def forensic_parser(text):
+    # Professional Patterns jo har bank format mein kaam karenge
     patterns = {
-        "upi_names": r"(?:UPI/|PAYTM/|GPR/)(?:[^/]+/){2}([^/]+)",
+        "upi_names": r"(?:UPI/|PAYTM/|GPR/|TRANSFER TO\s)(?:[^/]+/){0,2}([^/ \n\d]{3,})",
         "utr_ids": r"\b\d{12}\b",
-        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|YESB|CANARA|IDBI|PYTM)",
-        "locations": r"(?:ATM/|POS/|WDL/)([A-Z\s]{4,})",
+        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PYTM|UPI|CASH|WDL)",
+        "locations": r"(?:ATM/|POS/|WDL/|LOCATION:)([A-Z\s]{4,})",
     }
     
     results = {}
     for key, pattern in patterns.items():
         found = re.findall(pattern, text, re.IGNORECASE)
         if found:
-            counts = pd.Series(found).value_counts().head(10)
-            results[key] = "\n".join([f"• {k.strip()} ({v})" for k, v in counts.items()])
+            counts = pd.Series([f.strip() for f in found]).value_counts().head(10)
+            results[key] = "\n".join([f"• {k} ({v})" for k, v in counts.items()])
         else:
-            results[key] = "No Data Identified"
+            results[key] = "Record not identified"
     return results
 
 @app.post("/analyze")
@@ -31,36 +32,39 @@ async def analyze(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
     with open(temp_path, "wb") as f:
         f.write(await file.read())
-
+    
     try:
         full_text = ""
-        # Auto-Identify Format logic
-        if file.filename.lower().endswith('.pdf'):
+        ext = file.filename.lower().split('.')[-1]
+        
+        # 1. Handle PDF
+        if ext == 'pdf':
             doc = fitz.open(temp_path)
             for page in doc: full_text += page.get_text()
             doc.close()
-        elif file.filename.lower().endswith(('.xls', '.xlsx')):
-            df = pd.read_excel(temp_path)
+        # 2. Handle Excel (XLS, XLSX)
+        elif ext in ['xls', 'xlsx']:
+            df = pd.read_excel(temp_path, engine='openpyxl' if ext == 'xlsx' else None)
             full_text = df.to_string()
-        elif file.filename.lower().endswith('.csv'):
+        # 3. Handle CSV
+        elif ext == 'csv':
             df = pd.read_csv(temp_path)
             full_text = df.to_string()
         else:
-            return {"status": "error", "message": "Unsupported Format. Please use PDF or Excel."}
+            return {"status": "error", "message": f"Unsupported Format: {ext}"}
 
         if not full_text.strip():
-            return {"status": "error", "message": "Empty file or Scanned Image detected."}
+            return {"status": "error", "message": "The file seems empty or is a scanned image."}
 
-        results = smart_parser(full_text)
-        
+        analysis = forensic_parser(full_text)
         return {
-            "status": "success", 
+            "status": "success",
             "data": {
-                "most_frequent_person": results["upi_names"],
-                "top_banks": results["banks"],
-                "top_locations": results["locations"],
-                "top_utr": results["utr_ids"], # Fixed the key name here
-                "suspicious": "Forensic Analysis Complete"
+                "most_frequent_person": analysis["upi_names"],
+                "top_banks": analysis["banks"],
+                "top_locations": analysis["locations"],
+                "top_utr": analysis["utr_ids"],
+                "suspicious": "🚨 Deep Scan: Transaction Analysis Complete"
             }
         }
     except Exception as e:
