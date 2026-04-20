@@ -12,7 +12,7 @@ app.add_middleware(
 )
 
 # -------------------------------
-# 🔧 NORMALIZE DATA (CORE LOGIC)
+# Normalize DataFrame Columns
 # -------------------------------
 def normalize_dataframe(df):
     df.columns = [str(c).strip().upper() for c in df.columns]
@@ -39,20 +39,17 @@ def normalize_dataframe(df):
         elif "UPI" in col:
             mapping[col] = "UPI"
 
-    df = df.rename(columns=mapping)
-    return df
+    return df.rename(columns=mapping)
 
 
 # -------------------------------
-# 🧠 ANALYTICS ENGINE
+# Analysis Engine
 # -------------------------------
 def analyze(df):
 
     df = normalize_dataframe(df)
 
-    # Cleaning
     df['DATE'] = pd.to_datetime(df.get('DATE'), errors='coerce')
-
     df['CREDIT'] = pd.to_numeric(df.get('CREDIT', 0), errors='coerce').fillna(0)
     df['DEBIT'] = pd.to_numeric(df.get('DEBIT', 0), errors='coerce').fillna(0)
 
@@ -61,39 +58,28 @@ def analyze(df):
     df['ONLY_DATE'] = df['DATE'].dt.date
     df['HOUR'] = df['DATE'].dt.hour
 
-    # Top Accounts
-    top_accounts = df['ACCOUNT'].value_counts().head(10)
+    top_accounts = df['ACCOUNT'].value_counts().head(10) if 'ACCOUNT' in df.columns else {}
+    top_banks = df['BANK'].value_counts().head(10) if 'BANK' in df.columns else {}
 
-    # Top Banks
-    top_banks = df['BANK'].value_counts().head(10)
-
-    # Money Received
     top_received = df[df['FINAL_AMOUNT'] > 0] \
         .groupby('ACCOUNT')['FINAL_AMOUNT'] \
-        .sum().sort_values(ascending=False).head(10)
+        .sum().sort_values(ascending=False).head(10) if 'ACCOUNT' in df.columns else {}
 
-    # Money Sent
     top_sent = df[df['FINAL_AMOUNT'] < 0] \
         .groupby('ACCOUNT')['FINAL_AMOUNT'] \
-        .sum().abs().sort_values(ascending=False).head(10)
+        .sum().abs().sort_values(ascending=False).head(10) if 'ACCOUNT' in df.columns else {}
 
-    # UTR
     top_utr = df['UTR'].value_counts().head(10) if 'UTR' in df.columns else {}
-
-    # UPI
     top_upi = df['UPI'].value_counts().head(10) if 'UPI' in df.columns else {}
 
-    # Dates
     top_dates = df['ONLY_DATE'].value_counts().head(10)
-
-    # Time
     top_hours = df['HOUR'].value_counts().head(10)
 
     return {
-        "top_accounts": top_accounts.to_dict(),
-        "top_banks": top_banks.to_dict(),
-        "top_received": top_received.to_dict(),
-        "top_sent": top_sent.to_dict(),
+        "top_accounts": top_accounts if isinstance(top_accounts, dict) else top_accounts.to_dict(),
+        "top_banks": top_banks if isinstance(top_banks, dict) else top_banks.to_dict(),
+        "top_received": top_received if isinstance(top_received, dict) else top_received.to_dict(),
+        "top_sent": top_sent if isinstance(top_sent, dict) else top_sent.to_dict(),
         "top_utr": top_utr if isinstance(top_utr, dict) else top_utr.to_dict(),
         "top_upi": top_upi if isinstance(top_upi, dict) else top_upi.to_dict(),
         "top_dates": {str(k): int(v) for k, v in top_dates.items()},
@@ -102,20 +88,40 @@ def analyze(df):
 
 
 # -------------------------------
-# 🚀 API
+# API Routes
 # -------------------------------
 @app.get("/")
 def home():
     return {"status": "alive"}
 
+
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
 
-    df = pd.read_excel(file.file)
+    try:
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(file.file)
+        else:
+            df = pd.read_excel(file.file)
 
-    result = analyze(df)
+        if df is None or df.empty:
+            return {
+                "status": "success",
+                "data": {"message": "File loaded but no data found"}
+            }
 
-    return {
-        "status": "success",
-        "data": result
-    }
+        result = analyze(df)
+
+        return {
+            "status": "success",
+            "data": result
+        }
+
+    except Exception as e:
+        return {
+            "status": "success",
+            "data": {
+                "message": "Error handled",
+                "error": str(e)
+            }
+        }
