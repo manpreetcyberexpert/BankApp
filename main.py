@@ -2,17 +2,20 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import os
-from openai import OpenAI
+
+# Safe import (prevents crash if openai not installed properly)
+try:
+    from openai import OpenAI
+except:
+    OpenAI = None
 
 app = FastAPI()
 
 # Load API key safely
 api_key = os.getenv("OPENAI_API_KEY")
 
-if not api_key:
-    print("WARNING: OPENAI_API_KEY not found")
-
-client = OpenAI(api_key=api_key) if api_key else None
+# Initialize client safely
+client = OpenAI(api_key=api_key) if OpenAI and api_key else None
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,7 +41,7 @@ async def analyze_file(file: UploadFile = File(...)):
         except Exception:
             return {
                 "status": "success",
-                "report": "File could not be read. Please upload valid Excel/CSV."
+                "report": "Invalid file. Please upload Excel or CSV."
             }
 
         if df is None or df.empty:
@@ -52,32 +55,33 @@ async def analyze_file(file: UploadFile = File(...)):
 
         data_preview = df.to_string()
 
+        # If OpenAI not available
+        if not client:
+            return {
+                "status": "success",
+                "report": "AI service not configured. Please set OPENAI_API_KEY."
+            }
+
         prompt = f"""
 You are a professional financial forensic investigator.
 
-Analyze the following transaction dataset and provide:
+Analyze the following bank transaction data and provide:
 
-- Top 10 most involved accounts
-- Top 10 banks
-- Top accounts receiving money
-- Top accounts sending money
-- Top UTR transactions
-- Top UPI IDs
-- Peak transaction dates
-- Peak transaction times
-- Any suspicious patterns or fraud indicators
+1. Top 10 most involved accounts
+2. Top 10 banks
+3. Top accounts receiving money
+4. Top accounts sending money
+5. Top UTR transactions
+6. Top UPI IDs
+7. Peak transaction dates
+8. Peak transaction times
+9. Suspicious patterns or fraud indicators
 
 Data:
 {data_preview}
 
-Give a clear, structured report.
+Give a clean structured report.
 """
-
-        if not client:
-            return {
-                "status": "success",
-                "report": "API key missing. Please configure OPENAI_API_KEY."
-            }
 
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
