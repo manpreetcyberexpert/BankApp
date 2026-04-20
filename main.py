@@ -5,47 +5,48 @@ import fitz, pandas as pd, re, os, json
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def smart_forensic_parser(temp_path):
+def smart_forensic_engine(temp_path):
     doc = fitz.open(temp_path)
+    all_text = ""
     all_rows = []
+    
+    # 1. टेक्स्ट और टेबल दोनों को पढ़ना (Dual-Mode Scanning)
     for page in doc:
+        all_text += page.get_text()
         tabs = page.find_tables(strategy="text")
         for tab in tabs:
             rows = tab.extract()
             if rows: all_rows.extend(rows)
     doc.close()
     
-    if not all_rows: return None
+    # 2. Smart Identification Logic (बिना कॉलम नंबर के)
+    # हम पूरे डेटा में पैटर्न्स ढूंढेंगे
     
-    df = pd.DataFrame(all_rows)
-    
-    # Cleaning: Remove empty values and junk
-    def get_clean_top(col_idx, is_number=False):
-        if col_idx >= len(df.columns): return "No Data Identified"
-        data = df.iloc[:, col_idx].astype(str).str.strip()
-        # Junk words filter
-        junk = ["NONE", "N/A", "nan", "NULL", "BENEFICIARY NAME", "UTR", "BANK", "NAME"]
-        filtered = data[~data.str.upper().isin(junk) & (data.str.len() > 2)]
-        
-        if is_number:
-            # Sirf lambe numbers (A/c ya UTR) ke liye
-            filtered = filtered[filtered.str.contains(r'\d{8,}')]
-        else:
-            # Sirf Names/Text ke liye (Numbers hata diye)
-            filtered = filtered[~filtered.str.contains(r'^\d+$')]
-            
-        if filtered.empty: return "No Record Identified"
-        counts = filtered.value_counts().head(10)
+    # UTR: 12 अंकों का नंबर या बैंक स्पेसिफिक कोड
+    utr_pattern = r"\b\d{12}\b|[A-Z]{4}\d{7,12}"
+    # Account Numbers: 9 से 18 अंकों के नंबर जो UTR नहीं हैं
+    acc_pattern = r"\b\d{9,11}\b|\b\d{13,18}\b"
+    # Names: जो केवल अक्षरों से बने हों और बैंक कीवर्ड्स न हों
+    name_pattern = r"\b[A-Z]{3,}\s[A-Z]{3,}(?:\s[A-Z]{3,})?\b"
+    # Banks: IFSC कोड या बैंक के नाम
+    bank_pattern = r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PAYTM|IFSC|BARB|SBIN|HDFC0)"
+
+    def get_top_stats(pattern, text_data, exclude_list=[]):
+        found = re.findall(pattern, text_data, re.I)
+        cleaned = [f.strip().upper() for f in found if f.strip().upper() not in exclude_list]
+        if not cleaned: return "No Data Identified"
+        counts = pd.Series(cleaned).value_counts().head(10)
         return "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
 
-    # Aapki image ke Grid format ke hisab se mapping:
-    # Col 5 = Beneficiary Name | Col 6 = Bank Name/AC | Col 2 = UTR/Ref | Col 0 = Trans ID
+    # बैंक कीवर्ड्स जिन्हें नामों से हटाना है
+    junk_keywords = ["BANK", "ACCOUNT", "TRANSFER", "UPI", "TRANSACTION", "ID", "DATE", "TIME"]
+
     return {
-        "person": get_clean_top(5, is_number=False), # Names
-        "banks": get_clean_top(6, is_number=False),  # Bank Names
-        "utr": get_clean_top(2, is_number=True),    # Real UTRs
-        "accounts": get_clean_top(6, is_number=True), # Accounts (if in col 6)
-        "owner": f"⚖️ FORENSIC SCAN: GRID MODE\nTotal Transactions: {len(df)}\nStatus: High-Detail Investigation"
+        "person": get_top_stats(name_pattern, all_text, junk_keywords),
+        "banks": get_top_stats(bank_pattern, all_text),
+        "utr": get_top_stats(utr_pattern, all_text),
+        "accounts": get_top_stats(acc_pattern, all_text),
+        "owner": f"⚖️ CASE FILE ANALYZED: {os.path.basename(temp_path)}\nForensic Intelligence Level: High"
     }
 
 @app.post("/analyze")
@@ -53,15 +54,13 @@ async def analyze(file: UploadFile = File(...)):
     temp = f"temp_{file.filename}"
     with open(temp, "wb") as f: f.write(await file.read())
     try:
-        res = smart_forensic_parser(temp)
-        if not res: return {"status": "error", "message": "Grid structure not detected."}
-        
+        res = smart_forensic_engine(temp)
         return {"status": "success", "data": {
-            "most_frequent_person": f"👤 IDENTIFIED NAMES:\n{res['person']}",
-            "top_banks": f"🏛️ INTERACTED BANKS:\n{res['banks']}\n\n💳 DETECTED ACCOUNT NOs:\n{res['accounts']}",
-            "top_locations": "📍 SYSTEM TRANSACTION IDs:\nScan Result Attached",
-            "top_utr": f"🔢 UTR / REFERENCE LOGS:\n{res['utr']}",
-            "suspicious": "Forensic Complete",
+            "most_frequent_person": res["person"],
+            "top_banks": res["banks"],
+            "top_locations": f"💳 DETECTED ACCOUNT NUMBERS:\n{res['accounts']}",
+            "top_utr": res["utr"],
+            "suspicious": "Forensic Engine Active",
             "owner_info": res["owner"]
         }}
     except Exception as e: return {"status": "error", "message": str(e)}
