@@ -5,38 +5,50 @@ import fitz, pandas as pd, re, os, json
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def police_forensic_engine(text):
-    # Advanced Forensic Regex
+def forensic_scanner(text):
     patterns = {
-        "upi_out": r"(?:UPI|PAYTM|GPR)/.*?/(.*?)/", # Paisa Jisko Bheja
-        "upi_in": r"TRANSFER-FROM-(.*?)\s",         # Paisa Jahan Se Aaya
+        # UPI & Names (Incoming/Outgoing)
+        "outgoing": r"(?:UPI/|PAYTM/|TO\s|TRANSFER\sTO\s|GPR/)(?:[^/]+/){0,2}([^/ \n\d]{3,})",
+        "incoming": r"(?:CR\sFROM|TRANSFER-FROM-|BY\s|UPI/)(?:[^/]+/){0,2}([^/ \n\d]{3,})",
+        
+        # Banks Identifiers
+        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PYTM|YESB|CANARA|UNION|IDBI|CITI|HSBC)",
+        
+        # ATM ID & Locations (Identifying ATM/S1A... type IDs)
+        "atm_ids": r"(?:ATM/|POS/|WDL/|S\d[A-Z0-9]{4,}|[A-Z]{3}\d{4,})",
+        "locations": r"(?:ATM|POS|WDL)\s(?:ANY\sWHERE\s)?([A-Z\s]{4,})",
+        
+        # UTR & Transaction IDs (12 Digits)
         "utr": r"\b\d{12}\b",
-        "atm": r"(?:ATM|POS|WDL)/(.*?)\s",
-        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PYTM|UPI|CASH|WDL)"
+        "dates": r"\d{2}-\d{2}-\d{2,4}"
     }
     
     results = {}
     ledger = []
     
-    # Line by line Money Flow Analysis
+    # Forensic Money Flow Analysis
     lines = text.split('\n')
     for line in lines:
         amount = re.findall(r"(\d{1,10}\.\d{2})", line)
-        date = re.search(r"\d{2}-\d{2}-\d{2,4}", line)
+        date = re.search(patterns["dates"], line)
         if date and amount:
-            # Banking Formula: Identify Debit vs Credit based on position or keywords
-            type = "DEBIT" if any(x in line.upper() for x in ["UPI", "TRANSFER", "WDL", "ATM"]) else "CREDIT"
-            ledger.append({"date": date.group(), "amt": amount[-1], "type": type, "desc": line[:40]})
+            is_debit = any(x in line.upper() for x in ["UPI", "TRANSFER", "WDL", "ATM", "DR"])
+            m_type = "DEBIT" if is_debit else "CREDIT"
+            ledger.append({"date": date.group(), "amt": amount[-1], "type": m_type, "desc": line[:50]})
 
-    for key, pattern in patterns.items():
-        found = re.findall(pattern, text, re.IGNORECASE)
-        if found:
-            counts = pd.Series([f.strip().upper() for f in found]).value_counts().head(10)
-            results[key] = "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
-        else: results[key] = "No Data Identified"
+    def get_top_list(pattern, src_text):
+        found = re.findall(pattern, src_text, re.I)
+        if not found: return "Record Not Found"
+        counts = pd.Series([f.strip().upper() for f in found if len(f.strip()) > 2]).value_counts().head(10)
+        return "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
 
-    results["ledger"] = json.dumps(ledger[:150])
-    return results
+    return {
+        "person": f"💰 OUTGOING (TO):\n{get_top_list(patterns['outgoing'], text)}\n\n📥 INCOMING (FROM):\n{get_top_list(patterns['incoming'], text)}",
+        "banks": get_top_list(patterns['banks'], text),
+        "locs": f"🆔 ATM/POS IDs:\n{get_top_list(patterns['atm_ids'], text)}\n\n📍 LOCATIONS:\n{get_top_list(patterns['locations'], text)}",
+        "utr": get_top_list(patterns['utr'], text),
+        "ledger": json.dumps(ledger[:200])
+    }
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
@@ -46,11 +58,11 @@ async def analyze(file: UploadFile = File(...)):
         doc = fitz.open(temp)
         text = "".join([page.get_text() for page in doc])
         doc.close()
-        res = police_forensic_engine(text)
+        res = forensic_scanner(text)
         return {"status": "success", "data": {
-            "most_frequent_person": f"💰 OUTGOING (TO):\n{res['upi_out']}\n\n📥 INCOMING (FROM):\n{res['upi_in']}",
+            "most_frequent_person": res["person"],
             "top_banks": res["banks"],
-            "top_locations": res["atm"],
+            "top_locations": res["locs"],
             "top_utr": res["utr"],
             "suspicious": res["ledger"]
         }}
