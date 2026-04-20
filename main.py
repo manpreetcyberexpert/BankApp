@@ -1,106 +1,54 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import os
-
-# Safe import (prevents crash if openai not installed properly)
-try:
-    from openai import OpenAI
-except:
-    OpenAI = None
+import fitz, os, json, pandas as pd
+from openai import OpenAI
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Load API key safely
-api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize client safely
-client = OpenAI(api_key=api_key) if OpenAI and api_key else None
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+client = OpenAI(api_key="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")
 
 @app.get("/")
-def home():
-    return {"status": "alive"}
-
+def home(): return {"status": "alive"}
 
 @app.post("/analyze")
-async def analyze_file(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...)):
+    temp = f"temp_{file.filename}"
+    with open(temp, "wb") as f: f.write(await file.read())
+    
     try:
-        # Read file safely
-        try:
-            if file.filename.endswith(".csv"):
-                df = pd.read_csv(file.file)
-            else:
-                df = pd.read_excel(file.file)
-        except Exception:
-            return {
-                "status": "success",
-                "report": "Invalid file. Please upload Excel or CSV."
-            }
+        # 1. PDF Forensic Extraction
+        doc = fitz.open(temp)
+       
+        text = "".join([page.get_text() for page in doc[:15]]) 
+        doc.close()
 
-        if df is None or df.empty:
-            return {
-                "status": "success",
-                "report": "No data found in file"
-            }
-
-        # Limit rows (important for speed + cost)
-        df = df.head(150)
-
-        data_preview = df.to_string()
-
-        # If OpenAI not available
-        if not client:
-            return {
-                "status": "success",
-                "report": "AI service not configured. Please set OPENAI_API_KEY."
-            }
-
-        prompt = f"""
-You are a professional financial forensic investigator.
-
-Analyze the following bank transaction data and provide:
-
-1. Top 10 most involved accounts
-2. Top 10 banks
-3. Top accounts receiving money
-4. Top accounts sending money
-5. Top UTR transactions
-6. Top UPI IDs
-7. Peak transaction dates
-8. Peak transaction times
-9. Suspicious patterns or fraud indicators
-
-Data:
-{data_preview}
-
-Give a clean structured report.
-"""
-
+        # 2. ChatGPT Analysis (Fixed Path)
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are an expert financial fraud analyst."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "You are a Haryana Police Forensic Analyst. Extract Top 10 Names, Banks, Locations, and UTRs from the provided data. Return ONLY a JSON object with keys: names, banks, locations, utrs. Format values as bullet points string."},
+                {"role": "user", "content": text[:12000]} # Increase limit for better analysis
             ],
-            temperature=0.2
+            response_format={ "type": "json_object" }
         )
-
-        report = response.choices[0].message.content
+        
+      
+        ai_data = json.loads(response.choices[0].message.content)
 
         return {
             "status": "success",
-            "report": report
+            "data": {
+                "most_frequent_person": ai_data.get("names", "No names found"),
+                "top_banks": ai_data.get("banks", "No banks found"),
+                "top_locations": ai_data.get("locations", "No locations found"),
+                "top_utr": ai_data.get("utrs", "No UTRs found"),
+                "suspicious": "AI Case Analysis: Completed",
+                "owner_info": f"⚖️ HARYANA VIGIL-SCAN (AI MODE)\nCase ID: FIU-{os.urandom(2).hex().upper()}"
+            }
         }
-
     except Exception as e:
-        return {
-            "status": "success",
-            "report": f"Error: {str(e)}"
-        }
+        return {"status": "error", "message": f"Forensic Engine Error: {str(e)}"}
+    finally:
+        if os.path.exists(temp): os.remove(temp)
