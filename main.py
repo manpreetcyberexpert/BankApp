@@ -1,64 +1,185 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import fitz  # Zaroori PDF ke liye
 import pandas as pd
 import re
-import os
-import json
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def forensic_engine(temp_path):
-    doc = fitz.open(temp_path)
-    all_rows = []
-    for page in doc:
-        # 4000+ rows handle karne ke liye text strategy
-        tabs = page.find_tables(strategy="text")
-        for tab in tabs:
-            rows = tab.extract()
-            if rows: all_rows.extend(rows)
-    doc.close()
-    
-    if not all_rows: return None
-    df = pd.DataFrame(all_rows)
-    
-    def get_stats(col_idx):
-        if col_idx >= len(df.columns): return "N/A"
-        data = df.iloc[:, col_idx].astype(str).str.strip().str.upper()
-        clean = data[~data.isin(["NONE", "N/A", "NAN", "NULL", "BENEFICIARY NAME", "BANK NAME"])]
-        counts = clean[clean.str.len() > 2].value_counts().head(10)
-        return "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    return {
-        "person": get_stats(5), # Beneficiary Names
-        "banks": get_stats(6),  # Banks/Accounts
-        "locs": get_stats(0),   # System IDs
-        "utr": get_stats(2),    # UTR Numbers
-        "owner": f"⚖️ OFFICIAL FORENSIC REPORT\nTotal Records: {len(df)}\nStatus: Secure Scan Complete"
-    }
+# -------------------------------
+# Normalize Columns
+# -------------------------------
+def normalize_columns(df):
+    df.columns = [str(c).strip().upper() for c in df.columns]
 
+    mapping = {}
+    for col in df.columns:
+        if "DATE" in col:
+            mapping[col] = "DATE"
+        elif "ACCOUNT" in col:
+            mapping[col] = "ACCOUNT"
+        elif "NAME" in col:
+            mapping[col] = "NAME"
+        elif "BANK" in col:
+            mapping[col] = "BANK"
+        elif "UTR" in col or "REF" in col:
+            mapping[col] = "UTR"
+        elif "CR" in col:
+            mapping[col] = "CREDIT"
+        elif "DR" in col:
+            mapping[col] = "DEBIT"
+
+    return df.rename(columns=mapping)
+
+
+# -------------------------------
+# Clean Text (IMPORTANT)
+# -------------------------------
+def clean_text(series):
+    s = series.astype(str).str.upper().str.strip()
+
+    # remove junk words
+    s = s[~s.str.contains("ACCOUNT|TRANSACTION|ID|NO|DATE|AMOUNT|BALANCE", na=False)]
+
+    # remove small garbage
+    s = s[s.str.len() > 5]
+
+    # remove small numbers like 12, 05
+    s = s[~s.str.match(r'^\d{1,3}$')]
+
+    return s
+
+
+# -------------------------------
+# Extract Valid UTR
+# -------------------------------
+def extract_utr(series):
+    s = series.astype(str)
+    s = s[s.str.match(r'^[A-Z0-9]{10,}$')]
+    return s
+
+
+# -------------------------------
+# Extract Valid Account Numbers
+# -------------------------------
+def extract_accounts(series):
+    s = series.astype(str)
+    s = s[s.str.match(r'^\d{9,}$')]
+    return s
+
+
+# -------------------------------
+# MAIN ANALYSIS
+# -------------------------------
+def analyze(df):
+
+    df = normalize_columns(df)
+
+    result = {}
+
+    # -------------------------------
+    # ACCOUNTS
+    # -------------------------------
+    if 'ACCOUNT' in df.columns:
+        acc = extract_accounts(df['ACCOUNT'])
+        result['accounts'] = acc.value_counts().head(10).to_dict()
+    else:
+        result['accounts'] = {}
+
+    # -------------------------------
+    # BANKS
+    # -------------------------------
+    if 'BANK' in df.columns:
+        banks = clean_text(df['BANK'])
+        result['banks'] = banks.value_counts().head(10).to_dict()
+    else:
+        result['banks'] = {}
+
+    # -------------------------------
+    # NAMES
+    # -------------------------------
+    if 'NAME' in df.columns:
+        names = clean_text(df['NAME'])
+        result['names'] = names.value_counts().head(10).to_dict()
+    else:
+        result['names'] = {}
+
+    # -------------------------------
+    # UTR
+    # -------------------------------
+    if 'UTR' in df.columns:
+        utr = extract_utr(df['UTR'])
+        result['utr'] = utr.value_counts().head(10).to_dict()
+    else:
+        result['utr'] = {}
+
+    # -------------------------------
+    # MONEY SENT (DEBIT)
+    # -------------------------------
+    if 'ACCOUNT' in df.columns and 'DEBIT' in df.columns:
+        df['DEBIT'] = pd.to_numeric(df['DEBIT'], errors='coerce').fillna(0)
+        sent = df[df['DEBIT'] > 0].groupby('ACCOUNT')['DEBIT'].sum().sort_values(ascending=False)
+        result['sent'] = sent.head(10).to_dict()
+    else:
+        result['sent'] = {}
+
+    return result
+
+
+# -------------------------------
+# API
+# -------------------------------
 @app.get("/")
-def home(): return {"status": "alive"}
+def home():
+    return {"status": "alive"}
+
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    temp = f"temp_{file.filename}"
-    with open(temp, "wb") as f: f.write(await file.read())
+async def analyze_file(file: UploadFile = File(...)):
+
     try:
-        # Digital PDF format handling
-        res = forensic_engine(temp)
-        if not res: return {"status": "error", "message": "Structure not detected"}
-        
-        return {"status": "success", "data": {
-            "most_frequent_person": res["person"],
-            "top_banks": res["banks"],
-            "top_locations": res["locs"],
-            "top_utr": res["utr"],
-            "suspicious": "[]",
-            "owner_info": res["owner"]
-        }}
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(file.file)
+        else:
+            df = pd.read_excel(file.file)
+
+        if df is None or df.empty:
+            return {
+                "status": "success",
+                "data": {
+                    "most_frequent_person": {},
+                    "top_banks": {},
+                    "top_locations": {},
+                    "top_utr": {}
+                }
+            }
+
+        result = analyze(df)
+
+        return {
+            "status": "success",
+            "data": {
+                "most_frequent_person": result["names"] or result["accounts"],
+                "top_banks": result["banks"],
+                "top_locations": result["sent"],
+                "top_utr": result["utr"]
+            }
+        }
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-    finally:
-        if os.path.exists(temp): os.remove(temp)
+        return {
+            "status": "success",
+            "data": {
+                "most_frequent_person": {},
+                "top_banks": {},
+                "top_locations": {},
+                "top_utr": {},
+                "error": str(e)
+            }
+        }
