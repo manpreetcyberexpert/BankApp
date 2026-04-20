@@ -1,10 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-import fitz
-import os
-import numpy as np
-import re
 
 app = FastAPI()
 
@@ -16,121 +12,93 @@ app.add_middleware(
 )
 
 # -------------------------------
-# 🔍 SMART COLUMN DETECTION
+# 🔧 NORMALIZE DATA (CORE LOGIC)
 # -------------------------------
-def find_column(df, keywords):
-    for i in range(len(df.columns)):
-        sample = " ".join(df.iloc[:, i].astype(str).head(20)).upper()
-        if any(k in sample for k in keywords):
-            return i
-    return None
+def normalize_dataframe(df):
+    df.columns = [str(c).strip().upper() for c in df.columns]
 
+    mapping = {}
 
-# -------------------------------
-# 🧹 CLEAN DATA
-# -------------------------------
-def clean_series(series):
-    s = series.astype(str).str.upper().str.strip()
+    for col in df.columns:
+        if "DATE" in col:
+            mapping[col] = "DATE"
+        elif "AMOUNT" in col or "INR" in col:
+            mapping[col] = "AMOUNT"
+        elif "ACCOUNT" in col:
+            mapping[col] = "ACCOUNT"
+        elif "NAME" in col:
+            mapping[col] = "NAME"
+        elif "BANK" in col:
+            mapping[col] = "BANK"
+        elif "UTR" in col or "REF" in col:
+            mapping[col] = "UTR"
+        elif "CR" in col:
+            mapping[col] = "CREDIT"
+        elif "DR" in col:
+            mapping[col] = "DEBIT"
+        elif "UPI" in col:
+            mapping[col] = "UPI"
 
-    # remove junk
-    s = s[~s.str.contains("DATE|AMOUNT|BALANCE|CREDIT|DEBIT", na=False)]
-    s = s[~s.str.match(r'^\d{1,2}$')]
-    s = s[~s.str.match(r'^\d{1,2}:\d{2}$')]
-    s = s[~s.str.contains("AM|PM", na=False)]
-    s = s[~s.str.match(r'^[A-Z]$')]
-    s = s[s.str.len() > 5]
-
-    return s
-
-
-# -------------------------------
-# 📊 TOP VALUES
-# -------------------------------
-def get_top(series):
-    series = clean_series(series)
-    return series.value_counts().head(10).to_dict()
-
-
-# -------------------------------
-# 📂 PDF TABLE PARSER
-# -------------------------------
-def parse_pdf_table(path):
-    doc = fitz.open(path)
-    rows = []
-
-    for page in doc:
-        tables = page.find_tables(strategy="text")
-        for t in tables:
-            data = t.extract()
-            if data:
-                rows.extend(data)
-
-    doc.close()
-
-    if not rows:
-        return None
-
-    df = pd.DataFrame(rows)
-    df = df.replace([None, '', 'None'], np.nan)
-    df = df.dropna(how='all')
-
+    df = df.rename(columns=mapping)
     return df
 
 
 # -------------------------------
-# 📄 PDF TEXT FALLBACK
-# -------------------------------
-def parse_pdf_text(path):
-    doc = fitz.open(path)
-    lines = []
-
-    for page in doc:
-        text = page.get_text()
-        for line in text.split("\n"):
-            if len(line.strip()) > 5:
-                lines.append(line.strip())
-
-    doc.close()
-
-    if not lines:
-        return None
-
-    return pd.DataFrame(lines, columns=["raw"])
-
-
-# -------------------------------
-# 🧠 MAIN ANALYSIS
+# 🧠 ANALYTICS ENGINE
 # -------------------------------
 def analyze(df):
 
-    # if structured table
-    if len(df.columns) > 1:
+    df = normalize_dataframe(df)
 
-        name_col = find_column(df, ["NAME", "BENEFICIARY"])
-        bank_col = find_column(df, ["BANK"])
-        utr_col = find_column(df, ["UTR", "REF"])
-        acc_col = find_column(df, ["ACCOUNT", "A/C"])
-        id_col = find_column(df, ["ID", "TRANSACTION"])
+    # Cleaning
+    df['DATE'] = pd.to_datetime(df.get('DATE'), errors='coerce')
 
-        result = {
-            "names": get_top(df.iloc[:, name_col]) if name_col is not None else {},
-            "banks": get_top(df.iloc[:, bank_col]) if bank_col is not None else {},
-            "accounts": get_top(df.iloc[:, acc_col]) if acc_col is not None else {},
-            "utr": get_top(df.iloc[:, utr_col]) if utr_col is not None else {},
-            "transaction_ids": get_top(df.iloc[:, id_col]) if id_col is not None else {},
-        }
+    df['CREDIT'] = pd.to_numeric(df.get('CREDIT', 0), errors='coerce').fillna(0)
+    df['DEBIT'] = pd.to_numeric(df.get('DEBIT', 0), errors='coerce').fillna(0)
 
-    else:
-        # fallback raw text analysis
-        text_series = df.iloc[:, 0]
+    df['FINAL_AMOUNT'] = df['CREDIT'] - df['DEBIT']
 
-        result = {
-            "utr": get_top(text_series[text_series.str.contains(r'\d{10,}', na=False)]),
-            "accounts": get_top(text_series[text_series.str.contains(r'\d{9,}', na=False)]),
-            "names": get_top(text_series[text_series.str.contains(r'[A-Z]{3,}', na=False)]),
-        }
+    df['ONLY_DATE'] = df['DATE'].dt.date
+    df['HOUR'] = df['DATE'].dt.hour
 
-    return result
+    # Top Accounts
+    top_accounts = df['ACCOUNT'].value_counts().head(10)
+
+    # Top Banks
+    top_banks = df['BANK'].value_counts().head(10)
+
+    # Money Received
+    top_received = df[df['FINAL_AMOUNT'] > 0] \
+        .groupby('ACCOUNT')['FINAL_AMOUNT'] \
+        .sum().sort_values(ascending=False).head(10)
+
+    # Money Sent
+    top_sent = df[df['FINAL_AMOUNT'] < 0] \
+        .groupby('ACCOUNT')['FINAL_AMOUNT'] \
+        .sum().abs().sort_values(ascending=False).head(10)
+
+    # UTR
+    top_utr = df['UTR'].value_counts().head(10) if 'UTR' in df.columns else {}
+
+    # UPI
+    top_upi = df['UPI'].value_counts().head(10) if 'UPI' in df.columns else {}
+
+    # Dates
+    top_dates = df['ONLY_DATE'].value_counts().head(10)
+
+    # Time
+    top_hours = df['HOUR'].value_counts().head(10)
+
+    return {
+        "top_accounts": top_accounts.to_dict(),
+        "top_banks": top_banks.to_dict(),
+        "top_received": top_received.to_dict(),
+        "top_sent": top_sent.to_dict(),
+        "top_utr": top_utr if isinstance(top_utr, dict) else top_utr.to_dict(),
+        "top_upi": top_upi if isinstance(top_upi, dict) else top_upi.to_dict(),
+        "top_dates": {str(k): int(v) for k, v in top_dates.items()},
+        "top_hours": top_hours.to_dict()
+    }
 
 
 # -------------------------------
@@ -143,45 +111,11 @@ def home():
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
 
-    temp = f"temp_{file.filename}"
+    df = pd.read_excel(file.file)
 
-    with open(temp, "wb") as f:
-        f.write(await file.read())
+    result = analyze(df)
 
-    try:
-        # -------------------------------
-        # FILE TYPE HANDLING
-        # -------------------------------
-        if file.filename.endswith(".pdf"):
-
-            df = parse_pdf_table(temp)
-
-            # fallback if no table
-            if df is None:
-                df = parse_pdf_text(temp)
-
-                if df is None:
-                    return {
-                        "status": "error",
-                        "message": "File unreadable"
-                    }
-
-        elif file.filename.endswith(".csv"):
-            df = pd.read_csv(temp)
-
-        else:
-            df = pd.read_excel(temp)
-
-        result = analyze(df)
-
-        return {
-            "status": "success",
-            "data": result
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-    finally:
-        if os.path.exists(temp):
-            os.remove(temp)
+    return {
+        "status": "success",
+        "data": result
+    }
