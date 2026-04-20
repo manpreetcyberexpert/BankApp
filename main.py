@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import fitz  # PyMuPDF for PDF
+import fitz  # PyMuPDF
 import pandas as pd
 import re
 import os
@@ -8,66 +8,45 @@ import os
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def forensic_parser(text):
-    # Professional Patterns jo har bank format mein kaam karenge
-    patterns = {
-        "upi_names": r"(?:UPI/|PAYTM/|GPR/|TRANSFER TO\s)(?:[^/]+/){0,2}([^/ \n\d]{3,})",
-        "utr_ids": r"\b\d{12}\b",
-        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PYTM|UPI|CASH|WDL)",
-        "locations": r"(?:ATM/|POS/|WDL/|LOCATION:)([A-Z\s]{4,})",
+def forensic_engine(text):
+    data = {
+        "beneficiaries": re.findall(r"(?:UPI/|TO\s|TRANSFER\sTO\s)([^/ \n\d]{4,})", text, re.I),
+        "banks": re.findall(r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PAYTM|FEDERAL)", text, re.I),
+        "locations": re.findall(r"(?:ATM/|POS/|WDL/)([A-Z\s]{4,})", text),
+        "utr_ids": re.findall(r"\b\d{12}\b", text),
+        "dates": re.findall(r"\d{2}-\d{2}-\d{2,4}", text)
     }
     
-    results = {}
-    for key, pattern in patterns.items():
-        found = re.findall(pattern, text, re.IGNORECASE)
-        if found:
-            counts = pd.Series([f.strip() for f in found]).value_counts().head(10)
-            results[key] = "\n".join([f"• {k} ({v})" for k, v in counts.items()])
-        else:
-            results[key] = "Record not identified"
-    return results
+    def get_top_10(src):
+        if not src: return "N/A"
+        counts = pd.Series([s.strip().upper() for s in src]).value_counts().head(10)
+        return "\n".join([f"• {k} ({v})" for k, v in counts.items()])
+
+    return {
+        "person": get_top_10(data["beneficiaries"]),
+        "banks": get_top_10(data["banks"]),
+        "locs": get_top_10(data["locations"]),
+        "utr": get_top_10(data["utr_ids"]),
+        "dates": get_top_10(data["dates"])
+    }
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    temp_path = f"temp_{file.filename}"
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
-    
+    temp = f"temp_{file.filename}"
+    with open(temp, "wb") as f: f.write(await file.read())
     try:
-        full_text = ""
-        ext = file.filename.lower().split('.')[-1]
+        doc = fitz.open(temp)
+        text = "".join([page.get_text() for page in doc])
+        doc.close()
         
-        # 1. Handle PDF
-        if ext == 'pdf':
-            doc = fitz.open(temp_path)
-            for page in doc: full_text += page.get_text()
-            doc.close()
-        # 2. Handle Excel (XLS, XLSX)
-        elif ext in ['xls', 'xlsx']:
-            df = pd.read_excel(temp_path, engine='openpyxl' if ext == 'xlsx' else None)
-            full_text = df.to_string()
-        # 3. Handle CSV
-        elif ext == 'csv':
-            df = pd.read_csv(temp_path)
-            full_text = df.to_string()
-        else:
-            return {"status": "error", "message": f"Unsupported Format: {ext}"}
-
-        if not full_text.strip():
-            return {"status": "error", "message": "The file seems empty or is a scanned image."}
-
-        analysis = forensic_parser(full_text)
-        return {
-            "status": "success",
-            "data": {
-                "most_frequent_person": analysis["upi_names"],
-                "top_banks": analysis["banks"],
-                "top_locations": analysis["locations"],
-                "top_utr": analysis["utr_ids"],
-                "suspicious": "🚨 Deep Scan: Transaction Analysis Complete"
-            }
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Engine Error: {str(e)}"}
+        results = forensic_engine(text)
+        return {"status": "success", "data": {
+            "most_frequent_person": results["person"],
+            "top_banks": results["banks"],
+            "top_locations": results["locs"],
+            "top_utr": results["utr"],
+            "suspicious": f"Analysis complete. Found transactions on {len(results['dates'].splitlines())} dates."
+        }}
+    except Exception as e: return {"status": "error", "message": str(e)}
     finally:
-        if os.path.exists(temp_path): os.remove(temp_path)
+        if os.path.exists(temp): os.remove(temp)
