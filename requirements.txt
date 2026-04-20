@@ -5,3 +5,4 @@ numpy
 pymupdf
 openpyxl
 python-multipart
+openai>=1.0.0
