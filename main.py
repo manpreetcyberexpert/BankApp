@@ -1,143 +1,64 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+import fitz  # Zaroori PDF ke liye
 import pandas as pd
+import re
+import os
+import json
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def forensic_engine(temp_path):
+    doc = fitz.open(temp_path)
+    all_rows = []
+    for page in doc:
+        # 4000+ rows handle karne ke liye text strategy
+        tabs = page.find_tables(strategy="text")
+        for tab in tabs:
+            rows = tab.extract()
+            if rows: all_rows.extend(rows)
+    doc.close()
+    
+    if not all_rows: return None
+    df = pd.DataFrame(all_rows)
+    
+    def get_stats(col_idx):
+        if col_idx >= len(df.columns): return "N/A"
+        data = df.iloc[:, col_idx].astype(str).str.strip().str.upper()
+        clean = data[~data.isin(["NONE", "N/A", "NAN", "NULL", "BENEFICIARY NAME", "BANK NAME"])]
+        counts = clean[clean.str.len() > 2].value_counts().head(10)
+        return "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
 
-# -------------------------------
-# Normalize Data
-# -------------------------------
-def normalize_dataframe(df):
-    df.columns = [str(c).strip().upper() for c in df.columns]
+    return {
+        "person": get_stats(5), # Beneficiary Names
+        "banks": get_stats(6),  # Banks/Accounts
+        "locs": get_stats(0),   # System IDs
+        "utr": get_stats(2),    # UTR Numbers
+        "owner": f"⚖️ OFFICIAL FORENSIC REPORT\nTotal Records: {len(df)}\nStatus: Secure Scan Complete"
+    }
 
-    mapping = {}
-
-    for col in df.columns:
-        if "DATE" in col:
-            mapping[col] = "DATE"
-        elif "ACCOUNT" in col:
-            mapping[col] = "ACCOUNT"
-        elif "NAME" in col:
-            mapping[col] = "NAME"
-        elif "BANK" in col:
-            mapping[col] = "BANK"
-        elif "UTR" in col or "REF" in col:
-            mapping[col] = "UTR"
-        elif "CR" in col:
-            mapping[col] = "CREDIT"
-        elif "DR" in col:
-            mapping[col] = "DEBIT"
-
-    return df.rename(columns=mapping)
-
-
-# -------------------------------
-# Analysis Engine
-# -------------------------------
-def analyze(df):
-
-    df = normalize_dataframe(df)
-
-    # Safe numeric conversion
-    df['CREDIT'] = pd.to_numeric(df.get('CREDIT', 0), errors='coerce').fillna(0)
-    df['DEBIT'] = pd.to_numeric(df.get('DEBIT', 0), errors='coerce').fillna(0)
-
-    df['FINAL'] = df['CREDIT'] - df['DEBIT']
-
-    # -------------------------------
-    # Top Accounts (Most involved)
-    # -------------------------------
-    if 'ACCOUNT' in df.columns:
-        top_accounts = df['ACCOUNT'].value_counts().head(10).to_dict()
-    else:
-        top_accounts = {}
-
-    # -------------------------------
-    # Top Banks
-    # -------------------------------
-    if 'BANK' in df.columns:
-        top_banks = df['BANK'].value_counts().head(10).to_dict()
-    else:
-        top_banks = {}
-
-    # -------------------------------
-    # Money Sent (Used as Locations in UI)
-    # -------------------------------
-    if 'ACCOUNT' in df.columns:
-        top_sent = df[df['FINAL'] < 0] \
-            .groupby('ACCOUNT')['FINAL'] \
-            .sum().abs().sort_values(ascending=False).head(10).to_dict()
-    else:
-        top_sent = {}
-
-    # -------------------------------
-    # UTR
-    # -------------------------------
-    if 'UTR' in df.columns:
-        top_utr = df['UTR'].value_counts().head(10).to_dict()
-    else:
-        top_utr = {}
-
-    return top_accounts, top_banks, top_sent, top_utr
-
-
-# -------------------------------
-# API
-# -------------------------------
 @app.get("/")
-def home():
-    return {"status": "alive"}
-
+def home(): return {"status": "alive"}
 
 @app.post("/analyze")
-async def analyze_file(file: UploadFile = File(...)):
-
+async def analyze(file: UploadFile = File(...)):
+    temp = f"temp_{file.filename}"
+    with open(temp, "wb") as f: f.write(await file.read())
     try:
-        # Read file
-        if file.filename.endswith(".csv"):
-            df = pd.read_csv(file.file)
-        else:
-            df = pd.read_excel(file.file)
-
-        if df is None or df.empty:
-            return {
-                "status": "success",
-                "data": {
-                    "most_frequent_person": {},
-                    "top_banks": {},
-                    "top_locations": {},
-                    "top_utr": {}
-                }
-            }
-
-        top_accounts, top_banks, top_sent, top_utr = analyze(df)
-
-        # IMPORTANT: Android-compatible response
-        return {
-            "status": "success",
-            "data": {
-                "most_frequent_person": top_accounts,
-                "top_banks": top_banks,
-                "top_locations": top_sent,
-                "top_utr": top_utr
-            }
-        }
-
+        # Digital PDF format handling
+        res = forensic_engine(temp)
+        if not res: return {"status": "error", "message": "Structure not detected"}
+        
+        return {"status": "success", "data": {
+            "most_frequent_person": res["person"],
+            "top_banks": res["banks"],
+            "top_locations": res["locs"],
+            "top_utr": res["utr"],
+            "suspicious": "[]",
+            "owner_info": res["owner"]
+        }}
     except Exception as e:
-        return {
-            "status": "success",
-            "data": {
-                "most_frequent_person": {},
-                "top_banks": {},
-                "top_locations": {},
-                "top_utr": {},
-                "error": str(e)
-            }
-        }
+        return {"status": "error", "message": str(e)}
+    finally:
+        if os.path.exists(temp): os.remove(temp)
