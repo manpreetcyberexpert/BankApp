@@ -27,20 +27,35 @@ def find_column(df, keywords):
 
 
 # -------------------------------
-# 🧹 CLEAN VALUES (AI FILTER)
+# 🧹 CLEAN DATA (AI STYLE FILTER)
 # -------------------------------
-def clean_series(series):
+def clean_series(series, type="text"):
     s = series.astype(str).str.upper().str.strip()
 
     # remove junk
     junk = ["N/A", "NONE", "NULL", "NAN", "", "0", "ID", "NO"]
     s = s[~s.isin(junk)]
 
-    # remove small garbage
+    # remove short garbage
     s = s[s.str.len() > 5]
 
-    # remove pure numbers (like 12, 05, etc.)
-    s = s[~s.str.match(r'^\d{1,3}$')]
+    # remove time/date garbage
+    s = s[~s.str.match(r'^\d{1,2}$')]
+    s = s[~s.str.match(r'^\d{1,2}:\d{2}$')]
+    s = s[~s.str.contains("AM|PM", na=False)]
+
+    # remove single letters
+    s = s[~s.str.match(r'^[A-Z]$')]
+
+    # type-based filtering
+    if type == "name":
+        s = s[s.str.contains(r'[A-Z]{3,}', na=False)]
+
+    elif type == "utr":
+        s = s[s.str.match(r'^\d{10,}$')]
+
+    elif type == "account":
+        s = s[s.str.match(r'^\d{9,}$')]
 
     return s
 
@@ -48,11 +63,11 @@ def clean_series(series):
 # -------------------------------
 # 📊 TOP CALCULATION
 # -------------------------------
-def get_top(df, col_idx):
+def get_top(df, col_idx, type="text"):
     if col_idx is None or col_idx >= len(df.columns):
         return {}
 
-    data = clean_series(df.iloc[:, col_idx])
+    data = clean_series(df.iloc[:, col_idx], type)
     return data.value_counts().head(10).to_dict()
 
 
@@ -87,7 +102,7 @@ def parse_pdf(path):
 # -------------------------------
 def analyze(df):
 
-    # 🔍 detect columns dynamically
+    # 🔍 detect columns
     name_col = find_column(df, ["NAME", "BENEFICIARY"])
     bank_col = find_column(df, ["BANK", "IFSC"])
     utr_col = find_column(df, ["UTR", "REF"])
@@ -95,26 +110,26 @@ def analyze(df):
     id_col = find_column(df, ["ID", "TRANSACTION"])
 
     # -------------------------------
-    # 📊 DATA EXTRACTION
+    # 📊 extract data
     # -------------------------------
-    top_names = get_top(df, name_col)
-    top_banks = get_top(df, bank_col)
-    top_utr = get_top(df, utr_col)
-    top_accounts = get_top(df, acc_col)
-    top_ids = get_top(df, id_col)
+    top_names = get_top(df, name_col, "name")
+    top_banks = get_top(df, bank_col, "text")
+    top_utr = get_top(df, utr_col, "utr")
+    top_accounts = get_top(df, acc_col, "account")
+    top_ids = get_top(df, id_col, "text")
 
     # -------------------------------
-    # 🚨 SUSPICIOUS
+    # 🚨 suspicious detection
     # -------------------------------
     suspicious = {}
 
     if acc_col is not None:
-        acc_series = clean_series(df.iloc[:, acc_col])
+        acc_series = clean_series(df.iloc[:, acc_col], "account")
         freq = acc_series.value_counts()
         suspicious["high_frequency_accounts"] = freq[freq > 10].to_dict()
 
     # -------------------------------
-    # 📦 FINAL OUTPUT
+    # 📦 final output
     # -------------------------------
     return {
         "summary": {
@@ -150,19 +165,13 @@ async def analyze_file(file: UploadFile = File(...)):
         if file.filename.endswith(".pdf"):
             df = parse_pdf(temp_path)
             if df is None:
-                return {
-                    "status": "error",
-                    "message": "PDF structure not detected"
-                }
+                return {"status": "error", "message": "PDF structure not detected"}
         else:
             df = pd.read_excel(temp_path)
 
         result = analyze(df)
 
-        return {
-            "status": "success",
-            "data": result
-        }
+        return {"status": "success", "data": result}
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
