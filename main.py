@@ -1,47 +1,41 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import fitz
-import pandas as pd
-import re
-import os
-import json
+import fitz, pandas as pd, re, os, json
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def forensic_engine(text):
+def police_forensic_engine(text):
+    # Advanced Forensic Regex
     patterns = {
-        "upi": r"(?:UPI/|PAYTM/|GPR/|TRANSFER\sTO\s)(?:[^/]+/){0,2}([^/ \n\d]{3,})",
+        "upi_out": r"(?:UPI|PAYTM|GPR)/.*?/(.*?)/", # Paisa Jisko Bheja
+        "upi_in": r"TRANSFER-FROM-(.*?)\s",         # Paisa Jahan Se Aaya
         "utr": r"\b\d{12}\b",
-        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|YESB|CANARA|IDBI|PAYTM|FEDERAL|CENTRAL|UNION|CASH|WDL)",
-        "locs": r"(?:ATM/|POS/|WDL/|LOCATION:)([A-Z\s]{4,})",
-        "dates": r"\d{2}-\d{2}-\d{2,4}"
+        "atm": r"(?:ATM|POS|WDL)/(.*?)\s",
+        "banks": r"(HDFC|SBI|ICICI|AXIS|PNB|BOB|KOTAK|PYTM|UPI|CASH|WDL)"
     }
     
     results = {}
-    raw_data = []
+    ledger = []
     
+    # Line by line Money Flow Analysis
     lines = text.split('\n')
     for line in lines:
-        amount_match = re.search(r"(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)", line)
-        date_match = re.search(patterns["dates"], line)
-        if date_match and amount_match:
-            raw_data.append({
-                "date": date_match.group(),
-                "desc": line[:50].strip(),
-                "amount": amount_match.group()
-            })
+        amount = re.findall(r"(\d{1,10}\.\d{2})", line)
+        date = re.search(r"\d{2}-\d{2}-\d{2,4}", line)
+        if date and amount:
+            # Banking Formula: Identify Debit vs Credit based on position or keywords
+            type = "DEBIT" if any(x in line.upper() for x in ["UPI", "TRANSFER", "WDL", "ATM"]) else "CREDIT"
+            ledger.append({"date": date.group(), "amt": amount[-1], "type": type, "desc": line[:40]})
 
     for key, pattern in patterns.items():
-        if key == "dates": continue
         found = re.findall(pattern, text, re.IGNORECASE)
         if found:
             counts = pd.Series([f.strip().upper() for f in found]).value_counts().head(10)
-            results[key] = "\n".join([f"• {k} ({v})" for k, v in counts.items()])
-        else:
-            results[key] = "No Records Identified"
-            
-    results["detailed_json"] = json.dumps(raw_data[:100])
+            results[key] = "\n".join([f"• {k} ({v} times)" for k, v in counts.items()])
+        else: results[key] = "No Data Identified"
+
+    results["ledger"] = json.dumps(ledger[:150])
     return results
 
 @app.post("/analyze")
@@ -52,13 +46,13 @@ async def analyze(file: UploadFile = File(...)):
         doc = fitz.open(temp)
         text = "".join([page.get_text() for page in doc])
         doc.close()
-        res = forensic_engine(text)
+        res = police_forensic_engine(text)
         return {"status": "success", "data": {
-            "most_frequent_person": res["upi"],
+            "most_frequent_person": f"💰 OUTGOING (TO):\n{res['upi_out']}\n\n📥 INCOMING (FROM):\n{res['upi_in']}",
             "top_banks": res["banks"],
-            "top_locations": res["locs"],
+            "top_locations": res["atm"],
             "top_utr": res["utr"],
-            "suspicious": res["detailed_json"]
+            "suspicious": res["ledger"]
         }}
     except Exception as e: return {"status": "error", "message": str(e)}
     finally:
