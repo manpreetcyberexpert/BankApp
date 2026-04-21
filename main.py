@@ -1,163 +1,93 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import os
-import fitz
-import re
-import json
+import fitz, pandas as pd, numpy as np, os, json, re
 from openai import OpenAI
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class BankingForensicEngine:
+    @staticmethod
+    def extract_and_validate(temp_path):
+        doc = fitz.open(temp_path)
+        all_tables = []
+        for page in doc:
+            tabs = page.find_tables(strategy="text")
+            for tab in tabs:
+                df = tab.to_pandas()
+                if not df.empty: all_tables.append(df)
+        doc.close()
+        
+        if not all_tables: return None
+        df_master = pd.concat(all_tables, ignore_index=True)
+        
+        # --- Rule 1: Professional Cleaning (Excel-Style) ---
+        df_master = df_master.replace(r'^\s*$', np.nan, regex=True).dropna(how='all')
+        
+        # --- Rule 2: Amount & Date Standardisation ---
+        # Identifying Amount Column via Variance
+        numeric_df = df_master.apply(lambda x: pd.to_numeric(x.astype(str).str.replace(',', ''), errors='coerce'))
+        amt_col = numeric_df.std().idxmax()
+        
+        # Identifying Date Column
+        date_col = None
+        for col in df_master.columns:
+            if any(re.search(r'\d{2}[-/]\d{2}[-/]\d{2,4}', str(x)) for x in df_master[col].head(10)):
+                date_col = col
+                break
+        
+        # --- Rule 3: Mathematical Forensic Audit ---
+        amounts = numeric_df[amt_col].dropna()
+        total_cr = float(amounts[amounts > 0].sum())
+        total_dr = float(amounts[amounts < 0].sum().abs())
+        
+        # Risk Flags
+        high_risk_trx = len(amounts[amounts.abs() > 100000]) # 1 Lakh+
+        
+        return {
+            "df_sample": df_master.head(200).to_string(),
+            "math_stats": f"Volume: {len(df_master)} | Total Cr: ₹{total_cr:,.2f} | Total Dr: ₹{total_dr:,.2f}",
+            "risk_flag": f"High-Value Alerts: {high_risk_trx} identified"
+        }
 
-@app.get("/")
-def home():
-    return {"status": "alive"}
-
-
-# -------------------------------
-# CLEAN FUNCTION
-# -------------------------------
-def clean_series(series):
-    return (
-        series.astype(str)
-        .str.upper()
-        .str.strip()
-        .replace(["N/A", "NONE", "NULL", "0", "", "nan"], pd.NA)
-        .dropna()
-        .loc[lambda x: x.str.len() > 3]
-    )
-
-
-# -------------------------------
-# PANDAS ANALYSIS (EXACT DATA)
-# -------------------------------
-def structured_analysis(df):
-
-    df.columns = [str(c).upper().strip() for c in df.columns]
-
-    result = {}
-
-    # ACCOUNT
-    if "ACCOUNT" in df.columns:
-        acc = clean_series(df["ACCOUNT"])
-        result["most_frequent_person"] = acc.value_counts().head(10).index.tolist()
-
-    # BANK
-    if "BANK" in df.columns:
-        bank = clean_series(df["BANK"])
-        result["top_banks"] = bank.value_counts().head(10).index.tolist()
-
-    # UTR
-    if "UTR" in df.columns:
-        utr = clean_series(df["UTR"])
-        result["top_utr"] = utr.value_counts().head(10).index.tolist()
-
-    # DESCRIPTION → UPI
-    if "DESCRIPTION" in df.columns:
-        upi = df["DESCRIPTION"].astype(str).str.extract(r'([\w\.-]+@[\w\.-]+)')
-        result["top_locations"] = upi[0].dropna().value_counts().head(10).index.tolist()
-
-    return result
-
-
-# -------------------------------
-# AI ANALYSIS
-# -------------------------------
-def ai_analysis(text):
-
-    prompt = f"""
-You are a cybercrime financial investigator.
-
-Analyze this data and give:
-
-- Fraud pattern
-- Suspicious accounts
-- Risk level
-- Summary
-
-Data:
-{text}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "Expert fraud analyst"},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2
-    )
-
-    return response.choices[0].message.content
-
-
-# -------------------------------
-# MAIN API
-# -------------------------------
 @app.post("/analyze")
-async def analyze_file(file: UploadFile = File(...)):
-
-    temp_path = f"temp_{file.filename}"
-
+async def analyze(file: UploadFile = File(...)):
+    temp = f"temp_{file.filename}"
+    with open(temp, "wb") as f: f.write(await file.read())
     try:
-        with open(temp_path, "wb") as f:
-            f.write(await file.read())
+        engine = BankingForensicEngine()
+        audit = engine.extract_and_validate(temp)
+        
+        if not audit: return {"status": "error", "message": "Grid Not Detected"}
 
-        # READ FILE
-        if file.filename.endswith(".pdf"):
-            doc = fitz.open(temp_path)
-            text = "".join([p.get_text() for p in doc.pages[:5]])
-            doc.close()
-            df = None
+        # AI Investigation with Mathematical Grounding
+        prompt = f"""
+        Role: Haryana Police Senior Financial Auditor.
+        Math Data: {audit['math_stats']} | {audit['risk_flag']}
+        
+        Analyze the transactions for SMURFING, LAYERING, and STRUCTURING.
+        Return STRICT JSON with EXACT keys:
+        {{
+          "most_frequent_person": "Top 10 beneficiary names with counts",
+          "top_banks": "Identified Bank names and accounts",
+          "top_locations": "ATM/POS footprints",
+          "top_utr": "12-digit UTR list of suspicious transfers",
+          "suspicious": "10-line DEEP Forensic Analysis using Banking Formulas (Hindi-English).",
+          "owner_info": "{audit['math_stats']} | {audit['risk_flag']}"
+        }}
+        Data: {audit['df_sample'][:6000]}
+        """
 
-        elif file.filename.endswith(".csv"):
-            df = pd.read_csv(temp_path)
-            text = df.head(150).to_string()
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": "You are a Banking Forensic Expert."},
+                      {"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        return {"status": "success", "data": json.loads(response.choices[0].message.content)}
 
-        else:
-            df = pd.read_excel(temp_path)
-            text = df.head(150).to_string()
-
-        # -------------------------------
-        # STRUCTURED (EXACT)
-        # -------------------------------
-        structured = structured_analysis(df) if df is not None else {}
-
-        # -------------------------------
-        # AI (SMART)
-        # -------------------------------
-        ai_report = ai_analysis(text)
-
-        # -------------------------------
-        # FINAL RESPONSE
-        # -------------------------------
-        return {
-            "status": "success",
-            "data": {
-                "most_frequent_person": structured.get("most_frequent_person", []),
-                "top_banks": structured.get("top_banks", []),
-                "top_locations": structured.get("top_locations", []),
-                "top_utr": structured.get("top_utr", []),
-                "suspicious": ai_report,
-                "owner_info": "HYBRID AI SCAN COMPLETE"
-            }
-        }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
+    except Exception as e: return {"status": "error", "message": str(e)}
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(temp): os.remove(temp)
