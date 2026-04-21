@@ -1,75 +1,99 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import fitz, pandas as pd, re, os, json
+import pandas as pd
+import os
+
 from openai import OpenAI
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Render Environment Variables se API Key uthana
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def forensic_ai_engine(temp_path):
-    doc = fitz.open(temp_path)
-    all_rows = []
-    text_sample = ""
-    for i, page in enumerate(doc):
-        if i < 5: text_sample += page.get_text() # AI Analysis ke liye shuruati data
-        tabs = page.find_tables(strategy="text")
-        for tab in tabs:
-            rows = tab.extract()
-            if rows: all_rows.extend(rows)
-    doc.close()
-    
-    if not all_rows: return None
-    df = pd.DataFrame(all_rows)
-    
-    def get_stats(col_idx):
-        if col_idx >= len(df.columns): return "N/A"
-        data = df.iloc[:, col_idx].astype(str).str.strip().str.upper()
-        clean = data[~data.isin(["NONE", "N/A", "NAN", "NULL", "BENEFICIARY NAME", "BANK NAME"])]
-        return "\n".join([f"• {k} ({v} times)" for k, v in clean.value_counts().head(10).items()])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # --- AI INVESTIGATION ---
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a Haryana Police Forensic Expert."},
-                      {"role": "user", "content": f"Analyze these transactions for fraud patterns and provide a 5-line summary in Hindi/English mix:\n{text_sample[:3000]}"}]
-        )
-        ai_summary = response.choices[0].message.content
-    except:
-        ai_summary = "AI Analysis failed (Check API Credit/Key)"
+@app.get("/")
+def home():
+    return {"status": "alive"}
 
-    return {
-        "person": get_stats(5),
-        "banks": get_stats(6),
-        "locs": get_stats(0),
-        "utr": get_stats(2),
-        "ai_report": ai_summary,
-        "owner": f"🛡️ HARYANA VIGIL-SCAN (AI ENABLED)\nRecords Analyzed: {len(df)}\nStatus: AI Forensic Complete"
-    }
 
+# -------------------------------
+# CLEAN DATA
+# -------------------------------
+def clean_df(df):
+    df = df.fillna("")
+    df = df.astype(str)
+    return df
+
+
+# -------------------------------
+# MAIN API
+# -------------------------------
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    temp = f"temp_{file.filename}"
-    with open(temp, "wb") as f: f.write(await file.read())
+async def analyze_file(file: UploadFile = File(...)):
     try:
-        res = forensic_ai_engine(temp)
-        if not res: return {"status": "error", "message": "Grid mismatch"}
-        
-        # EXACT KEYS FOR ANDROID
+        # Read file
+        if file.filename.endswith(".csv"):
+            df = pd.read_csv(file.file)
+        else:
+            df = pd.read_excel(file.file)
+
+        if df is None or df.empty:
+            return {"status": "error", "message": "Empty file"}
+
+        df = clean_df(df)
+
+        # Reduce size for AI
+        sample = df.head(200).to_string()
+
+        # 🔥 VERY IMPORTANT PROMPT
+        prompt = f"""
+You are a cybercrime financial investigator.
+
+Analyze the transaction data and return STRICT JSON format:
+
+{{
+  "top_accounts": [],
+  "top_banks": [],
+  "top_received": [],
+  "top_sent": [],
+  "top_utr": [],
+  "top_upi": [],
+  "peak_dates": [],
+  "peak_times": [],
+  "suspicious_summary": ""
+}}
+
+Rules:
+- Ignore junk values like PM, AM, 05, 12/
+- Only include real names, accounts, banks
+- Return top 10 in each category
+- Use clean readable values
+- Detect actual financial patterns
+
+Data:
+{sample}
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "Expert financial fraud analyst"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1
+        )
+
+        ai_output = response.choices[0].message.content
+
         return {
             "status": "success",
-            "data": {
-                "most_frequent_person": res["person"],
-                "top_banks": res["banks"],
-                "top_locations": res["locs"],
-                "top_utr": res["utr"],
-                "suspicious": res["ai_report"], # AI Report ko 'suspicious' field mein bhej rahe hain
-                "owner_info": res["owner"]
-            }
+            "data": ai_output   # JSON string
         }
-    except Exception as e: return {"status": "error", "message": str(e)}
-    finally:
-        if os.path.exists(temp): os.remove(temp)
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
