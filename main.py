@@ -1,186 +1,75 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import os
-import re
-
-# Safe OpenAI import
-try:
-    from openai import OpenAI
-except:
-    OpenAI = None
+import fitz, pandas as pd, re, os, json
+from openai import OpenAI
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Load API key
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if OpenAI and api_key else None
+# Render Environment Variables se API Key uthana
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def forensic_ai_engine(temp_path):
+    doc = fitz.open(temp_path)
+    all_rows = []
+    text_sample = ""
+    for i, page in enumerate(doc):
+        if i < 5: text_sample += page.get_text() # AI Analysis ke liye shuruati data
+        tabs = page.find_tables(strategy="text")
+        for tab in tabs:
+            rows = tab.extract()
+            if rows: all_rows.extend(rows)
+    doc.close()
+    
+    if not all_rows: return None
+    df = pd.DataFrame(all_rows)
+    
+    def get_stats(col_idx):
+        if col_idx >= len(df.columns): return "N/A"
+        data = df.iloc[:, col_idx].astype(str).str.strip().str.upper()
+        clean = data[~data.isin(["NONE", "N/A", "NAN", "NULL", "BENEFICIARY NAME", "BANK NAME"])]
+        return "\n".join([f"• {k} ({v} times)" for k, v in clean.value_counts().head(10).items()])
 
-@app.get("/")
-def home():
-    return {"status": "alive"}
-
-
-# -------------------------------
-# Normalize columns
-# -------------------------------
-def normalize(df):
-    df.columns = [str(c).upper().strip() for c in df.columns]
-
-    mapping = {}
-    for col in df.columns:
-        if "DATE" in col:
-            mapping[col] = "DATE"
-        elif "ACCOUNT" in col:
-            mapping[col] = "ACCOUNT"
-        elif "NAME" in col:
-            mapping[col] = "NAME"
-        elif "BANK" in col:
-            mapping[col] = "BANK"
-        elif "UTR" in col or "REF" in col:
-            mapping[col] = "UTR"
-        elif "CR" in col or "CREDIT" in col:
-            mapping[col] = "CREDIT"
-        elif "DR" in col or "DEBIT" in col:
-            mapping[col] = "DEBIT"
-        elif "DESC" in col or "REMARK" in col:
-            mapping[col] = "DESCRIPTION"
-
-    return df.rename(columns=mapping)
-
-
-# -------------------------------
-# Local Analysis (fast)
-# -------------------------------
-def local_analysis(df):
-    df = normalize(df)
-
-    df["CREDIT"] = pd.to_numeric(df.get("CREDIT", 0), errors="coerce").fillna(0)
-    df["DEBIT"] = pd.to_numeric(df.get("DEBIT", 0), errors="coerce").fillna(0)
-
-    df["FINAL"] = df["CREDIT"] - df["DEBIT"]
-
-    result = {}
-
-    if "ACCOUNT" in df.columns:
-        result["top_accounts"] = df["ACCOUNT"].value_counts().head(10).to_dict()
-
-        result["top_received"] = (
-            df[df["FINAL"] > 0]
-            .groupby("ACCOUNT")["FINAL"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(10)
-            .to_dict()
-        )
-
-        result["top_sent"] = (
-            df[df["FINAL"] < 0]
-            .groupby("ACCOUNT")["FINAL"]
-            .sum()
-            .abs()
-            .sort_values(ascending=False)
-            .head(10)
-            .to_dict()
-        )
-
-    if "BANK" in df.columns:
-        result["top_banks"] = df["BANK"].value_counts().head(10).to_dict()
-
-    if "UTR" in df.columns:
-        result["top_utr"] = df["UTR"].value_counts().head(10).to_dict()
-
-    if "DESCRIPTION" in df.columns:
-        upi = df["DESCRIPTION"].astype(str).str.extract(r'([\w\.-]+@[\w\.-]+)')
-        result["top_upi"] = upi[0].value_counts().head(10).to_dict()
-
-    if "DATE" in df.columns:
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        result["peak_dates"] = df["DATE"].dt.date.value_counts().head(10).to_dict()
-
-    return result
-
-
-# -------------------------------
-# MAIN API
-# -------------------------------
-@app.post("/analyze")
-async def analyze_file(file: UploadFile = File(...)):
+    # --- AI INVESTIGATION ---
     try:
-        # Read file
-        try:
-            if file.filename.endswith(".csv"):
-                df = pd.read_csv(file.file)
-            else:
-                df = pd.read_excel(file.file)
-        except:
-            return {"status": "error", "message": "Invalid file format"}
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "You are a Haryana Police Forensic Expert."},
+                      {"role": "user", "content": f"Analyze these transactions for fraud patterns and provide a 5-line summary in Hindi/English mix:\n{text_sample[:3000]}"}]
+        )
+        ai_summary = response.choices[0].message.content
+    except:
+        ai_summary = "AI Analysis failed (Check API Credit/Key)"
 
-        if df is None or df.empty:
-            return {"status": "error", "message": "Empty file"}
+    return {
+        "person": get_stats(5),
+        "banks": get_stats(6),
+        "locs": get_stats(0),
+        "utr": get_stats(2),
+        "ai_report": ai_summary,
+        "owner": f"🛡️ HARYANA VIGIL-SCAN (AI ENABLED)\nRecords Analyzed: {len(df)}\nStatus: AI Forensic Complete"
+    }
 
-        # Run local analysis
-        structured = local_analysis(df)
-
-        # -------------------------------
-        # AI Analysis
-        # -------------------------------
-        if client:
-            sample = df.head(100).to_string()
-
-            prompt = f"""
-You are a cyber crime financial investigator.
-
-Analyze this transaction dataset and provide:
-
-- Fraud patterns
-- Suspicious accounts
-- Money flow behavior
-- Risk summary
-
-Data:
-{sample}
-"""
-
-            response = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": "Expert fraud analyst"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2
-            )
-
-            ai_report = response.choices[0].message.content
-        else:
-            ai_report = "AI not configured"
-
-        # -------------------------------
-        # FINAL RESPONSE (ANDROID SAFE)
-        # -------------------------------
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...)):
+    temp = f"temp_{file.filename}"
+    with open(temp, "wb") as f: f.write(await file.read())
+    try:
+        res = forensic_ai_engine(temp)
+        if not res: return {"status": "error", "message": "Grid mismatch"}
+        
+        # EXACT KEYS FOR ANDROID
         return {
             "status": "success",
             "data": {
-                "ai_report": ai_report,
-                "top_accounts": structured.get("top_accounts", {}),
-                "top_banks": structured.get("top_banks", {}),
-                "top_received": structured.get("top_received", {}),
-                "top_sent": structured.get("top_sent", {}),
-                "top_utr": structured.get("top_utr", {}),
-                "top_upi": structured.get("top_upi", {}),
-                "peak_dates": structured.get("peak_dates", {})
+                "most_frequent_person": res["person"],
+                "top_banks": res["banks"],
+                "top_locations": res["locs"],
+                "top_utr": res["utr"],
+                "suspicious": res["ai_report"], # AI Report ko 'suspicious' field mein bhej rahe hain
+                "owner_info": res["owner"]
             }
         }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    except Exception as e: return {"status": "error", "message": str(e)}
+    finally:
+        if os.path.exists(temp): os.remove(temp)
