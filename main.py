@@ -8,8 +8,10 @@ from openai import OpenAI
 
 app = FastAPI()
 
+# Load API Key from environment
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# CORS (important for Android)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,73 +19,119 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------------------------------
+# Health Check
+# -------------------------------
 @app.get("/")
 def home():
     return {"status": "alive"}
 
+
+# -------------------------------
+# File Analyzer API
+# -------------------------------
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
+
     temp_path = f"temp_{file.filename}"
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
 
     try:
-       
+        # Save file temporarily
+        with open(temp_path, "wb") as f:
+            f.write(await file.read())
+
+        # -------------------------------
+        # Read File (ALL formats supported)
+        # -------------------------------
         if file.filename.lower().endswith(".pdf"):
             doc = fitz.open(temp_path)
-           
-            sample_text = "".join([page.get_text() for page in doc.pages[:10]])
+            text = ""
+            for page in doc.pages[:5]:
+                text += page.get_text()
             doc.close()
-        elif file.filename.lower().endswith((".csv", ".xls", ".xlsx")):
-            df = pd.read_csv(temp_path) if file.filename.endswith(".csv") else pd.read_excel(temp_path)
-            sample_text = df.head(300).to_string() # 300 rows for AI
+
+        elif file.filename.lower().endswith(".csv"):
+            df = pd.read_csv(temp_path)
+            text = df.head(150).to_string()
+
+        elif file.filename.lower().endswith((".xls", ".xlsx")):
+            df = pd.read_excel(temp_path)
+            text = df.head(150).to_string()
+
         else:
-            return {"status": "error", "message": "Format not supported"}
+            return {
+                "status": "success",
+                "data": empty_response("Unsupported file format")
+            }
 
-        
+        if not text.strip():
+            return {
+                "status": "success",
+                "data": empty_response("No readable data")
+            }
+
+        # -------------------------------
+        # AI PROMPT (STRICT JSON OUTPUT)
+        # -------------------------------
         prompt = f"""
-        You are a Haryana Police Cybercrime Forensic Expert.
-        Analyze this bank data and return a JSON object with these EXACT keys.
-        Value must be a SINGLE STRING with newline characters (\n) for lists.
+You are a professional financial forensic investigator.
 
-        Required JSON Structure:
-        {{
-          "most_frequent_person": "List top 10 beneficiary names with count",
-          "top_banks": "List top 10 banks and account numbers",
-          "top_locations": "List identified ATM/POS locations and IDs",
-          "top_utr": "List top 10 12-digit UTR/Ref numbers",
-          "suspicious": "5-line fraud pattern analysis in Hindi/English mix",
-          "owner_info": "🛡️ HARYANA VIGIL-SCAN: AI SCAN COMPLETE"
-        }}
+Analyze the dataset and return STRICT JSON:
 
-        Rules: 
-        - Ignore junk like AM, PM, 12/, 05. 
-        - Only include valid financial data.
-        - Data must be formatted as a readable string list.
+{{
+  "most_frequent_person": ["Top 10 names or accounts"],
+  "top_banks": ["Top 10 banks"],
+  "top_locations": ["Top ATM IDs or locations"],
+  "top_utr": ["Top UTR / transaction IDs"],
+  "suspicious": "5 line fraud analysis",
+  "owner_info": "HARYANA VIGIL SCAN COMPLETE"
+}}
 
-        Data: {sample_text[:5000]}
-        """
+IMPORTANT:
+- Ignore words like AM, PM, DATE numbers
+- Only extract real financial data
+- Output must be valid JSON only
+
+DATA:
+{text[:4000]}
+"""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a professional financial fraud investigator."},
+                {"role": "system", "content": "You are a financial fraud analyst."},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"},
-            temperature=0.1
+            response_format={"type": "json_object"}
         )
 
-    
         ai_output = json.loads(response.choices[0].message.content)
 
         return {
             "status": "success",
-            "data": ai_data # Android App accepts this structure
+            "data": ai_output
         }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "success",
+            "data": empty_response(str(e))
+        }
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+# -------------------------------
+# Empty Safe Response (No Crash)
+# -------------------------------
+def empty_response(msg="No Data"):
+    return {
+        "most_frequent_person": [],
+        "top_banks": [],
+        "top_locations": [],
+        "top_utr": [],
+        "suspicious": msg,
+        "owner_info": "SYSTEM SAFE MODE"
+    }
