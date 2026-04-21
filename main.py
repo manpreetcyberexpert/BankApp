@@ -8,85 +8,67 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-class BankingForensicEngine:
-    @staticmethod
-    def extract_and_validate(temp_path):
-        doc = fitz.open(temp_path)
-        all_tables = []
-        for page in doc:
-            tabs = page.find_tables(strategy="text")
-            for tab in tabs:
-                df = tab.to_pandas()
-                if not df.empty: all_tables.append(df)
-        doc.close()
-        
-        if not all_tables: return None
-        df_master = pd.concat(all_tables, ignore_index=True)
-        
-        # --- Rule 1: Professional Cleaning (Excel-Style) ---
-        df_master = df_master.replace(r'^\s*$', np.nan, regex=True).dropna(how='all')
-        
-        # --- Rule 2: Amount & Date Standardisation ---
-        # Identifying Amount Column via Variance
-        numeric_df = df_master.apply(lambda x: pd.to_numeric(x.astype(str).str.replace(',', ''), errors='coerce'))
-        amt_col = numeric_df.std().idxmax()
-        
-        # Identifying Date Column
-        date_col = None
-        for col in df_master.columns:
-            if any(re.search(r'\d{2}[-/]\d{2}[-/]\d{2,4}', str(x)) for x in df_master[col].head(10)):
-                date_col = col
-                break
-        
-        # --- Rule 3: Mathematical Forensic Audit ---
-        amounts = numeric_df[amt_col].dropna()
-        total_cr = float(amounts[amounts > 0].sum())
-        total_dr = float(amounts[amounts < 0].sum().abs())
-        
-        # Risk Flags
-        high_risk_trx = len(amounts[amounts.abs() > 100000]) # 1 Lakh+
-        
-        return {
-            "df_sample": df_master.head(200).to_string(),
-            "math_stats": f"Volume: {len(df_master)} | Total Cr: ₹{total_cr:,.2f} | Total Dr: ₹{total_dr:,.2f}",
-            "risk_flag": f"High-Value Alerts: {high_risk_trx} identified"
-        }
-
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
     temp = f"temp_{file.filename}"
     with open(temp, "wb") as f: f.write(await file.read())
     try:
-        engine = BankingForensicEngine()
-        audit = engine.extract_and_validate(temp)
-        
-        if not audit: return {"status": "error", "message": "Grid Not Detected"}
+        # 1. Extraction
+        doc = fitz.open(temp)
+        all_tabs = []
+        for page in doc:
+            tabs = page.find_tables(strategy="text")
+            for tab in tabs: all_tabs.append(tab.to_pandas())
+        doc.close()
 
-        # AI Investigation with Mathematical Grounding
+        if not all_tabs: return {"status": "error", "message": "Grid Not Detected"}
+        df = pd.concat(all_tabs, ignore_index=True)
+
+        # 2. Math Formula (Excel-style calculation)
+        numeric_df = df.apply(lambda x: pd.to_numeric(x.astype(str).str.replace(',', ''), errors='coerce'))
+        amt_col = numeric_df.std().idxmax()
+        amounts = numeric_df[amt_col].dropna()
+        total_cr = float(amounts[amounts > 0].sum())
+        total_dr = float(amounts[amounts < 0].sum().abs())
+        math_summary = f"Total Credit: ₹{total_cr:,.2f} | Total Debit: ₹{total_dr:,.2f}"
+
+        # 3. AI Forensic Prompt (STRICT KEY MATCHING FOR ANDROID)
         prompt = f"""
         Role: Haryana Police Senior Financial Auditor.
-        Math Data: {audit['math_stats']} | {audit['risk_flag']}
+        Analyze this data and return STRICT JSON with these EXACT keys.
+        Values must be SINGLE STRINGS with \\n.
         
-        Analyze the transactions for SMURFING, LAYERING, and STRUCTURING.
-        Return STRICT JSON with EXACT keys:
         {{
-          "most_frequent_person": "Top 10 beneficiary names with counts",
-          "top_banks": "Identified Bank names and accounts",
-          "top_locations": "ATM/POS footprints",
-          "top_utr": "12-digit UTR list of suspicious transfers",
-          "suspicious": "10-line DEEP Forensic Analysis using Banking Formulas (Hindi-English).",
-          "owner_info": "{audit['math_stats']} | {audit['risk_flag']}"
+          "most_frequent_person": "Top 10 beneficiary names and counts",
+          "top_banks": "Top 10 banks and account numbers",
+          "top_locations": "Identify ATM/POS footprints and suspicious hours",
+          "top_utr": "List 12-digit UTR/Ref numbers of high-value transfers",
+          "suspicious": "10-line DEEP Forensic Analysis summary (Hindi-English mix) using banking formulas."
         }}
-        Data: {audit['df_sample'][:6000]}
+        Data Sample: {df.head(150).to_string()[:5000]}
         """
 
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a Banking Forensic Expert."},
+            messages=[{"role": "system", "content": "You are a professional Cyber Forensic Analyst."},
                       {"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
-        return {"status": "success", "data": json.loads(response.choices[0].message.content)}
+        
+        ai_res = json.loads(response.choices.message.content)
+        
+        # MAPPING TO YOUR ANDROID DATA CLASS
+        return {
+            "status": "success",
+            "data": {
+                "most_frequent_person": ai_res["most_frequent_person"],
+                "top_banks": ai_res["top_banks"],
+                "top_locations": ai_res["top_locations"],
+                "top_utr": ai_res["top_utr"],
+                "suspicious": ai_res["suspicious"],
+                "owner_info": f"🛡️ HARYANA VIGIL-SCAN | {math_summary}"
+            }
+        }
 
     except Exception as e: return {"status": "error", "message": str(e)}
     finally:
