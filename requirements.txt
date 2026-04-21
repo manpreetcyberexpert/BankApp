@@ -5,3 +5,4 @@ pandas
 openpyxl
 openai
 python-multipart
+gpt-4.1-mini
