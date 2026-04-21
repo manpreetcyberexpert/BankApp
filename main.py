@@ -4,15 +4,11 @@ import pandas as pd
 import os
 import fitz
 import json
-
 from openai import OpenAI
 
 app = FastAPI()
-
-# Load API key from environment
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,126 +16,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------
-# Health Check
-# -------------------------------
 @app.get("/")
-def home():
-    return {"status": "alive"}
+def home(): return {"status": "alive"}
 
-
-# -------------------------------
-# Clean unwanted junk text
-# -------------------------------
-def clean_text(text):
-    junk = ["AM", "PM", "N/A", "NULL", "0", "05", "12/"]
-    for j in junk:
-        text = text.replace(j, "")
-    return text
-
-
-# -------------------------------
-# Empty fallback response
-# -------------------------------
-def empty_response(msg="No Data Found"):
-    return {
-        "most_frequent_person": [],
-        "top_banks": [],
-        "top_locations": [],
-        "top_utr": [],
-        "suspicious": msg,
-        "owner_info": "SYSTEM SAFE MODE"
-    }
-
-
-# -------------------------------
-# MAIN API
-# -------------------------------
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
 
     try:
-        # Save uploaded file
-        with open(temp_path, "wb") as f:
-            f.write(await file.read())
-
-        # -------------------------------
-        # READ FILE (PDF / EXCEL / CSV)
-        # -------------------------------
+        # 1. READ FILE
         if file.filename.lower().endswith(".pdf"):
             doc = fitz.open(temp_path)
-            text = ""
-            for page in doc.pages[:5]:
-                text += page.get_text()
+            # 4000 rows handle karne ke liye text sampling
+            text = "".join([page.get_text() for page in doc.pages[:10]])
             doc.close()
-
-        elif file.filename.lower().endswith(".csv"):
-            df = pd.read_csv(temp_path)
-            text = df.head(150).to_string()
-
-        elif file.filename.lower().endswith((".xls", ".xlsx")):
-            df = pd.read_excel(temp_path)
-            text = df.head(150).to_string()
-
+        elif file.filename.lower().endswith((".csv", ".xls", ".xlsx")):
+            df = pd.read_csv(temp_path) if file.filename.endswith(".csv") else pd.read_excel(temp_path)
+            text = df.head(300).to_string()
         else:
-            return {"status": "success", "data": empty_response("Unsupported File Format")}
+            return {"status": "error", "message": "Format Not Supported"}
 
-        # Clean text
-        text = clean_text(text)
-
-        if not text.strip():
-            return {"status": "success", "data": empty_response("No readable data")}
-
-        # -------------------------------
-        # AI PROMPT (STRICT JSON)
-        # -------------------------------
+        # 2. AI PROMPT (STRICT STRING FORMAT FOR ANDROID)
         prompt = f"""
-You are a professional financial forensic investigator.
+        Analyze this bank data for Haryana Police. Return STRICT JSON.
+        Every value must be a SINGLE STRING, not a list. Use \\n for new lines.
 
-Analyze the transaction dataset and return STRICT JSON:
-
-{{
-  "most_frequent_person": ["Top 10 names or accounts"],
-  "top_banks": ["Top 10 banks"],
-  "top_locations": ["Top ATM IDs or locations"],
-  "top_utr": ["Top UTR / transaction IDs"],
-  "suspicious": "5 line fraud analysis summary",
-  "owner_info": "HARYANA VIGIL SCAN COMPLETE"
-}}
-
-RULES:
-- Ignore junk like AM, PM, 05, 12/
-- Extract only real financial entities
-- Return only valid JSON
-
-DATA:
-{text[:4000]}
-"""
+        Structure:
+        {{
+          "most_frequent_person": "Top 10 beneficiary names with counts",
+          "top_banks": "Top 10 banks and account numbers",
+          "top_locations": "ATM IDs and locations found",
+          "top_utr": "List 12-digit UTR numbers",
+          "suspicious": "5-line fraud pattern analysis in Hindi/English mix",
+          "owner_info": "🛡️ HARYANA VIGIL-SCAN: AI SCAN COMPLETE"
+        }}
+        Rules: Ignore AM, PM, 12/, 05. Extract only real financial data.
+        Data: {text[:5000]}
+        """
 
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini", # Corrected Model Name
             messages=[
-                {"role": "system", "content": "You are a cyber crime financial analyst."},
+                {"role": "system", "content": "You are a professional forensic investigator."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.1
         )
 
-        ai_output = json.loads(response.choices[0].message.content)
+        ai_data = json.loads(response.choices[0].message.content)
 
         return {
             "status": "success",
-            "data": ai_output
+            "data": ai_data
         }
 
     except Exception as e:
-        return {
-            "status": "success",
-            "data": empty_response(str(e))
-        }
-
+        return {"status": "error", "message": str(e)}
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(temp_path): os.remove(temp_path)
