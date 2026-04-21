@@ -23,19 +23,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------
-# ROOT CHECK
-# -------------------------------
 @app.get("/")
 def home():
     return {"status": "alive"}
 
 
 # -------------------------------
-# SMART COLUMN DETECTION
+# Normalize columns
 # -------------------------------
-def normalize_columns(df):
-    df.columns = [str(c).strip().upper() for c in df.columns]
+def normalize(df):
+    df.columns = [str(c).upper().strip() for c in df.columns]
 
     mapping = {}
     for col in df.columns:
@@ -60,30 +57,22 @@ def normalize_columns(df):
 
 
 # -------------------------------
-# FORENSIC ANALYSIS ENGINE
+# Local Analysis (fast)
 # -------------------------------
-def forensic_analysis(df):
-    df = normalize_columns(df)
+def local_analysis(df):
+    df = normalize(df)
 
-    # Safe numeric conversion
     df["CREDIT"] = pd.to_numeric(df.get("CREDIT", 0), errors="coerce").fillna(0)
     df["DEBIT"] = pd.to_numeric(df.get("DEBIT", 0), errors="coerce").fillna(0)
 
     df["FINAL"] = df["CREDIT"] - df["DEBIT"]
 
-    insights = {}
+    result = {}
 
-    # Top accounts
     if "ACCOUNT" in df.columns:
-        insights["top_accounts"] = df["ACCOUNT"].value_counts().head(10).to_dict()
+        result["top_accounts"] = df["ACCOUNT"].value_counts().head(10).to_dict()
 
-    # Top banks
-    if "BANK" in df.columns:
-        insights["top_banks"] = df["BANK"].value_counts().head(10).to_dict()
-
-    # Money received
-    if "ACCOUNT" in df.columns:
-        insights["top_received"] = (
+        result["top_received"] = (
             df[df["FINAL"] > 0]
             .groupby("ACCOUNT")["FINAL"]
             .sum()
@@ -92,9 +81,7 @@ def forensic_analysis(df):
             .to_dict()
         )
 
-    # Money sent
-    if "ACCOUNT" in df.columns:
-        insights["top_sent"] = (
+        result["top_sent"] = (
             df[df["FINAL"] < 0]
             .groupby("ACCOUNT")["FINAL"]
             .sum()
@@ -104,31 +91,25 @@ def forensic_analysis(df):
             .to_dict()
         )
 
-    # UTR
-    if "UTR" in df.columns:
-        insights["top_utr"] = df["UTR"].value_counts().head(10).to_dict()
+    if "BANK" in df.columns:
+        result["top_banks"] = df["BANK"].value_counts().head(10).to_dict()
 
-    # UPI detection
+    if "UTR" in df.columns:
+        result["top_utr"] = df["UTR"].value_counts().head(10).to_dict()
+
     if "DESCRIPTION" in df.columns:
         upi = df["DESCRIPTION"].astype(str).str.extract(r'([\w\.-]+@[\w\.-]+)')
-        insights["top_upi"] = upi[0].value_counts().head(10).to_dict()
+        result["top_upi"] = upi[0].value_counts().head(10).to_dict()
 
-    # Dates
     if "DATE" in df.columns:
         df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        insights["peak_dates"] = df["DATE"].dt.date.value_counts().head(10).to_dict()
+        result["peak_dates"] = df["DATE"].dt.date.value_counts().head(10).to_dict()
 
-    # Suspicious pattern (simple)
-    insights["suspicious_flags"] = {
-        "high_frequency_accounts": list(insights.get("top_accounts", {}).keys())[:3],
-        "high_value_receivers": list(insights.get("top_received", {}).keys())[:3],
-    }
-
-    return insights
+    return result
 
 
 # -------------------------------
-# API
+# MAIN API
 # -------------------------------
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
@@ -139,52 +120,67 @@ async def analyze_file(file: UploadFile = File(...)):
                 df = pd.read_csv(file.file)
             else:
                 df = pd.read_excel(file.file)
-        except Exception:
+        except:
             return {"status": "error", "message": "Invalid file format"}
 
         if df is None or df.empty:
             return {"status": "error", "message": "Empty file"}
 
-        # Run forensic engine
-        structured_data = forensic_analysis(df)
+        # Run local analysis
+        structured = local_analysis(df)
 
-        # AI ANALYSIS (ADVANCED)
+        # -------------------------------
+        # AI Analysis
+        # -------------------------------
         if client:
             sample = df.head(100).to_string()
 
             prompt = f"""
 You are a cyber crime financial investigator.
 
-Analyze this transaction data and generate:
+Analyze this transaction dataset and provide:
 
-- Fraud pattern detection
-- Network behavior analysis
+- Fraud patterns
 - Suspicious accounts
-- Money laundering indicators
-- Final investigation summary
+- Money flow behavior
+- Risk summary
 
 Data:
 {sample}
 """
 
-            ai_response = client.chat.completions.create(
+            response = client.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
-                    {"role": "system", "content": "Expert cybercrime analyst"},
+                    {"role": "system", "content": "Expert fraud analyst"},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2
             )
 
-            ai_report = ai_response.choices[0].message.content
+            ai_report = response.choices[0].message.content
         else:
             ai_report = "AI not configured"
 
+        # -------------------------------
+        # FINAL RESPONSE (ANDROID SAFE)
+        # -------------------------------
         return {
             "status": "success",
-            "structured": structured_data,
-            "ai_report": ai_report
+            "data": {
+                "ai_report": ai_report,
+                "top_accounts": structured.get("top_accounts", {}),
+                "top_banks": structured.get("top_banks", {}),
+                "top_received": structured.get("top_received", {}),
+                "top_sent": structured.get("top_sent", {}),
+                "top_utr": structured.get("top_utr", {}),
+                "top_upi": structured.get("top_upi", {}),
+                "peak_dates": structured.get("peak_dates", {})
+            }
         }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error",
+            "message": str(e)
+        }
