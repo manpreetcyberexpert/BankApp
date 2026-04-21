@@ -1,8 +1,7 @@
 fastapi
 uvicorn
-pandas
-numpy
 pymupdf
+pandas
 openpyxl
+openai
 python-multipart
-openai>=1.0.0
