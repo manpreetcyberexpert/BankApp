@@ -2,6 +2,9 @@ fastapi
 uvicorn
 pymupdf
 pandas
+numpy
 openpyxl
-openai
 python-multipart
+openai
+httpx
+scipy
