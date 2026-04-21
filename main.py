@@ -13,7 +13,7 @@ async def analyze(file: UploadFile = File(...)):
     temp = f"temp_{file.filename}"
     with open(temp, "wb") as f: f.write(await file.read())
     try:
-        # 1. Extraction
+        # 1. Deep Grid Extraction (Forensic Grade)
         doc = fitz.open(temp)
         all_tabs = []
         for page in doc:
@@ -24,48 +24,48 @@ async def analyze(file: UploadFile = File(...)):
         if not all_tabs: return {"status": "error", "message": "Grid Not Detected"}
         df = pd.concat(all_tabs, ignore_index=True)
 
-        # 2. Math Formula (Excel-style calculation)
-        numeric_df = df.apply(lambda x: pd.to_numeric(x.astype(str).str.replace(',', ''), errors='coerce'))
-        amt_col = numeric_df.std().idxmax()
-        amounts = numeric_df[amt_col].dropna()
+        # 2. Banking Math (Excel-style logic)
+        # Cleaning amounts for calculation
+        df_clean = df.apply(lambda x: pd.to_numeric(x.astype(str).str.replace(',', ''), errors='coerce'))
+        amt_col = df_clean.std().idxmax()
+        amounts = df_clean[amt_col].dropna()
         total_cr = float(amounts[amounts > 0].sum())
         total_dr = float(amounts[amounts < 0].sum().abs())
-        math_summary = f"Total Credit: ₹{total_cr:,.2f} | Total Debit: ₹{total_dr:,.2f}"
+        math_summary = f"Total Credit: ₹{total_cr:,.2f} | Total Debit: ₹{total_dr:,.2f} | Rows: {len(df)}"
 
-        # 3. AI Forensic Prompt (STRICT KEY MATCHING FOR ANDROID)
+        # 3. AI Investigation (Strictly mapped to Android Keys)
         prompt = f"""
-        Role: Haryana Police Senior Financial Auditor.
-        Analyze this data and return STRICT JSON with these EXACT keys.
-        Values must be SINGLE STRINGS with \\n.
-        
+        Role: Senior Haryana Police Financial Investigator.
+        Analyze the bank ledger for Fraud, Layering, and Money Laundering.
+        Return STRICT JSON with these EXACT keys:
         {{
-          "most_frequent_person": "Top 10 beneficiary names and counts",
-          "top_banks": "Top 10 banks and account numbers",
-          "top_locations": "Identify ATM/POS footprints and suspicious hours",
-          "top_utr": "List 12-digit UTR/Ref numbers of high-value transfers",
-          "suspicious": "10-line DEEP Forensic Analysis summary (Hindi-English mix) using banking formulas."
+          "most_frequent_person": "Top 10 names with transaction counts",
+          "top_banks": "Top 10 involved banks and accounts",
+          "top_locations": "Identify ATM IDs and POS locations",
+          "top_utr": "List of 12-digit UTR/Ref numbers",
+          "suspicious": "10-line forensic analysis summary (Hindi-English mix) based on math and patterns."
         }}
-        Data Sample: {df.head(150).to_string()[:5000]}
+        Data: {df.head(200).to_string()[:5000]}
         """
 
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a professional Cyber Forensic Analyst."},
+            messages=[{"role": "system", "content": "You are a professional Cyber Forensic Auditor."},
                       {"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
         
         ai_res = json.loads(response.choices.message.content)
-        
-        # MAPPING TO YOUR ANDROID DATA CLASS
+
+        # FINAL RESPONSE - MATCHING ANDROID DATA CLASS EXACTLY
         return {
             "status": "success",
             "data": {
-                "most_frequent_person": ai_res["most_frequent_person"],
-                "top_banks": ai_res["top_banks"],
-                "top_locations": ai_res["top_locations"],
-                "top_utr": ai_res["top_utr"],
-                "suspicious": ai_res["suspicious"],
+                "most_frequent_person": str(ai_res["most_frequent_person"]),
+                "top_banks": str(ai_res["top_banks"]),
+                "top_locations": str(ai_res["top_locations"]),
+                "top_utr": str(ai_res["top_utr"]),
+                "suspicious": str(ai_res["suspicious"]),
                 "owner_info": f"🛡️ HARYANA VIGIL-SCAN | {math_summary}"
             }
         }
