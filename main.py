@@ -8,7 +8,6 @@ from openai import OpenAI
 
 app = FastAPI()
 
-# Make sure OPENAI_API_KEY is set in Render Environment Variables
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app.add_middleware(
@@ -22,12 +21,6 @@ app.add_middleware(
 def home():
     return {"status": "alive"}
 
-def clean_text(text):
-    bad_words = ["AM", "PM", "NA", "N/A", "NULL", "0", "05", "12/"]
-    for word in bad_words:
-        text = text.replace(word, "")
-    return text
-
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
@@ -35,53 +28,58 @@ async def analyze_file(file: UploadFile = File(...)):
         f.write(await file.read())
 
     try:
-        # FILE READ LOGIC
+       
         if file.filename.lower().endswith(".pdf"):
             doc = fitz.open(temp_path)
-            # 4000 rows ke liye pehle 5-10 pages ka sample kaafi hai AI ke liye
+           
             sample_text = "".join([page.get_text() for page in doc.pages[:10]])
             doc.close()
         elif file.filename.lower().endswith((".csv", ".xls", ".xlsx")):
             df = pd.read_csv(temp_path) if file.filename.endswith(".csv") else pd.read_excel(temp_path)
-            sample_text = df.head(200).to_string()
+            sample_text = df.head(300).to_string() # 300 rows for AI
         else:
-            return {"status": "error", "message": "Unsupported Format"}
+            return {"status": "error", "message": "Format not supported"}
 
-        sample_text = clean_text(sample_text)
-
-        # AI FORENSIC PROMPT
+        
         prompt = f"""
-        You are a Haryana Police cybercrime financial investigator.
-        Return STRICT JSON ONLY:
+        You are a Haryana Police Cybercrime Forensic Expert.
+        Analyze this bank data and return a JSON object with these EXACT keys.
+        Value must be a SINGLE STRING with newline characters (\n) for lists.
+
+        Required JSON Structure:
         {{
-          "most_frequent_person": "Top 10 real names/accounts here",
-          "top_banks": "Top 10 banks used here",
-          "top_locations": "Identify ATM/POS locations here",
-          "top_utr": "List 12-digit UTR/Ref numbers here",
-          "suspicious": "5-line fraud pattern analysis here",
-          "owner_info": "🛡️ HARYANA VIGIL-SCAN: AI INVESTIGATION COMPLETE"
+          "most_frequent_person": "List top 10 beneficiary names with count",
+          "top_banks": "List top 10 banks and account numbers",
+          "top_locations": "List identified ATM/POS locations and IDs",
+          "top_utr": "List top 10 12-digit UTR/Ref numbers",
+          "suspicious": "5-line fraud pattern analysis in Hindi/English mix",
+          "owner_info": "🛡️ HARYANA VIGIL-SCAN: AI SCAN COMPLETE"
         }}
-        Rules: Ignore AM, PM, 05, 12/. Extract ONLY real financial entities.
-        Data: {sample_text[:4000]}
+
+        Rules: 
+        - Ignore junk like AM, PM, 12/, 05. 
+        - Only include valid financial data.
+        - Data must be formatted as a readable string list.
+
+        Data: {sample_text[:5000]}
         """
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # CORRECTED MODEL NAME
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Expert financial fraud investigator"},
+                {"role": "system", "content": "You are a professional financial fraud investigator."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.1
         )
 
-        # Response Parsing
-        ai_output = response.choices[0].message.content
-        ai_data = json.loads(ai_output)
+    
+        ai_output = json.loads(response.choices[0].message.content)
 
         return {
             "status": "success",
-            "data": ai_data
+            "data": ai_data # Android App accepts this structure
         }
 
     except Exception as e:
