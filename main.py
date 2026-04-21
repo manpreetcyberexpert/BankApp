@@ -2,11 +2,13 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import os
-
+import fitz
+import json
 from openai import OpenAI
 
 app = FastAPI()
 
+# Make sure OPENAI_API_KEY is set in Render Environment Variables
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app.add_middleware(
@@ -20,80 +22,70 @@ app.add_middleware(
 def home():
     return {"status": "alive"}
 
+def clean_text(text):
+    bad_words = ["AM", "PM", "NA", "N/A", "NULL", "0", "05", "12/"]
+    for word in bad_words:
+        text = text.replace(word, "")
+    return text
 
-# -------------------------------
-# CLEAN DATA
-# -------------------------------
-def clean_df(df):
-    df = df.fillna("")
-    df = df.astype(str)
-    return df
-
-
-# -------------------------------
-# MAIN API
-# -------------------------------
 @app.post("/analyze")
 async def analyze_file(file: UploadFile = File(...)):
+    temp_path = f"temp_{file.filename}"
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
+
     try:
-        # Read file
-        if file.filename.endswith(".csv"):
-            df = pd.read_csv(file.file)
+        # FILE READ LOGIC
+        if file.filename.lower().endswith(".pdf"):
+            doc = fitz.open(temp_path)
+            # 4000 rows ke liye pehle 5-10 pages ka sample kaafi hai AI ke liye
+            sample_text = "".join([page.get_text() for page in doc.pages[:10]])
+            doc.close()
+        elif file.filename.lower().endswith((".csv", ".xls", ".xlsx")):
+            df = pd.read_csv(temp_path) if file.filename.endswith(".csv") else pd.read_excel(temp_path)
+            sample_text = df.head(200).to_string()
         else:
-            df = pd.read_excel(file.file)
+            return {"status": "error", "message": "Unsupported Format"}
 
-        if df is None or df.empty:
-            return {"status": "error", "message": "Empty file"}
+        sample_text = clean_text(sample_text)
 
-        df = clean_df(df)
-
-        # Reduce size for AI
-        sample = df.head(200).to_string()
-
-        # 🔥 VERY IMPORTANT PROMPT
+        # AI FORENSIC PROMPT
         prompt = f"""
-You are a cybercrime financial investigator.
-
-Analyze the transaction data and return STRICT JSON format:
-
-{{
-  "top_accounts": [],
-  "top_banks": [],
-  "top_received": [],
-  "top_sent": [],
-  "top_utr": [],
-  "top_upi": [],
-  "peak_dates": [],
-  "peak_times": [],
-  "suspicious_summary": ""
-}}
-
-Rules:
-- Ignore junk values like PM, AM, 05, 12/
-- Only include real names, accounts, banks
-- Return top 10 in each category
-- Use clean readable values
-- Detect actual financial patterns
-
-Data:
-{sample}
-"""
+        You are a Haryana Police cybercrime financial investigator.
+        Return STRICT JSON ONLY:
+        {{
+          "most_frequent_person": "Top 10 real names/accounts here",
+          "top_banks": "Top 10 banks used here",
+          "top_locations": "Identify ATM/POS locations here",
+          "top_utr": "List 12-digit UTR/Ref numbers here",
+          "suspicious": "5-line fraud pattern analysis here",
+          "owner_info": "🛡️ HARYANA VIGIL-SCAN: AI INVESTIGATION COMPLETE"
+        }}
+        Rules: Ignore AM, PM, 05, 12/. Extract ONLY real financial entities.
+        Data: {sample_text[:4000]}
+        """
 
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini", # CORRECTED MODEL NAME
             messages=[
-                {"role": "system", "content": "Expert financial fraud analyst"},
+                {"role": "system", "content": "Expert financial fraud investigator"},
                 {"role": "user", "content": prompt}
             ],
+            response_format={"type": "json_object"},
             temperature=0.1
         )
 
+        # Response Parsing
         ai_output = response.choices[0].message.content
+        ai_data = json.loads(ai_output)
 
         return {
             "status": "success",
-            "data": ai_output   # JSON string
+            "data": ai_data
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
